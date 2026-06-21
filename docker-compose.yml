@@ -1,0 +1,223 @@
+version: '3.9'
+
+networks:
+  federation-net:
+    driver: bridge
+
+volumes:
+  postgres-meta-data:
+  postgres-source-data:
+  mongo-source-data:
+
+services:
+
+  # ──────────────────────────────────────────────
+  # METADATA DATABASE (PostgreSQL)
+  # Stores dataset metadata, column info, audit logs
+  # ──────────────────────────────────────────────
+  postgres-meta:
+    image: postgres:16-alpine
+    container_name: fap-postgres-meta
+    environment:
+      POSTGRES_DB: analytics_meta
+      POSTGRES_USER: meta_user
+      POSTGRES_PASSWORD: meta_pass_2024
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres-meta-data:/var/lib/postgresql/data
+      - ./init/postgres-meta-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - federation-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meta_user -d analytics_meta"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # SOURCE DATABASE — PostgreSQL
+  # User-managed: create your own tables/data here
+  # ──────────────────────────────────────────────
+  postgres-source:
+    image: postgres:16-alpine
+    container_name: fap-postgres-source
+    environment:
+      POSTGRES_DB: ${POSTGRES_SOURCE_DB:-source_db}
+      POSTGRES_USER: ${POSTGRES_SOURCE_USER:-source_user}
+      POSTGRES_PASSWORD: ${POSTGRES_SOURCE_PASSWORD:-source_pass_2024}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-source-data:/var/lib/postgresql/data
+    networks:
+      - federation-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SOURCE_USER:-source_user} -d ${POSTGRES_SOURCE_DB:-source_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # SOURCE DATABASE — MongoDB
+  # User-managed: create your own collections/data here
+  # ──────────────────────────────────────────────
+  mongo-source:
+    image: mongo:7
+    container_name: fap-mongo-source
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-source-data:/data/db
+    networks:
+      - federation-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # TRINO — Federated Query Engine
+  # Federates across postgres-source and mongo-source
+  # ──────────────────────────────────────────────
+  trino:
+    image: trinodb/trino:438
+    container_name: fap-trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/config/config.properties:/etc/trino/config.properties:ro
+      - ./trino/config/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino/config/node.properties:/etc/trino/node.properties:ro
+    networks:
+      - federation-net
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+      mongo-source:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ──────────────────────────────────────────────
+  # AI ENGINE SERVICE (Python / FastAPI)
+  # Converts NL questions to structured query plans
+  # ──────────────────────────────────────────────
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: fap-ai-engine
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
+      POSTGRES_META_HOST: postgres-meta
+      POSTGRES_META_PORT: 5432
+      POSTGRES_META_DB: analytics_meta
+      POSTGRES_META_USER: meta_user
+      POSTGRES_META_PASSWORD: meta_pass_2024
+    ports:
+      - "8082:8082"
+    networks:
+      - federation-net
+    depends_on:
+      postgres-meta:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8082/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ──────────────────────────────────────────────
+  # QUERY SERVICE (Go)
+  # Executes validated query plans against Trino
+  # ──────────────────────────────────────────────
+  query-service:
+    build:
+      context: ./query-service
+      dockerfile: Dockerfile
+    container_name: fap-query-service
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+      QUERY_SERVICE_PORT: 8083
+    ports:
+      - "8083:8083"
+    networks:
+      - federation-net
+    depends_on:
+      trino:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # CORE API SERVICE (Go / Gin)
+  # Single entry point for the frontend
+  # Orchestrates AI Engine + Query Service
+  # ──────────────────────────────────────────────
+  core-api:
+    build:
+      context: ./core-api
+      dockerfile: Dockerfile
+    container_name: fap-core-api
+    environment:
+      CORE_API_PORT: 8081
+      AI_ENGINE_URL: http://ai-engine:8082
+      QUERY_SERVICE_URL: http://query-service:8083
+      AI_ENABLED: ${AI_ENABLED:-true}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-poc-demo-token-2024}
+      POSTGRES_META_HOST: postgres-meta
+      POSTGRES_META_PORT: 5432
+      POSTGRES_META_DB: analytics_meta
+      POSTGRES_META_USER: meta_user
+      POSTGRES_META_PASSWORD: meta_pass_2024
+    ports:
+      - "8081:8081"
+    networks:
+      - federation-net
+    depends_on:
+      postgres-meta:
+        condition: service_healthy
+      ai-engine:
+        condition: service_healthy
+      query-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # FRONTEND (React + TypeScript + Vite / Nginx)
+  # ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081}
+        VITE_API_TOKEN: ${VITE_API_TOKEN:-poc-demo-token-2024}
+    container_name: fap-frontend
+    ports:
+      - "3000:80"
+    networks:
+      - federation-net
+    depends_on:
+      core-api:
+        condition: service_healthy

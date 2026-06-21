@@ -1,0 +1,100 @@
+package middleware
+
+import (
+	"database/sql"
+	"encoding/json"
+	"log"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// AuditContextKey keys used to pass audit data through the request context
+const (
+	AuditRequestIDKey = "audit_request_id"
+	AuditQuestionKey  = "audit_question"
+	AuditModeKey      = "audit_mode"
+	AuditStatusKey    = "audit_status"
+	AuditErrorKey     = "audit_error"
+	AuditRowCountKey  = "audit_row_count"
+	AuditPlanKey      = "audit_plan"
+	AuditSQLKey       = "audit_sql"
+)
+
+// Audit middleware logs every request to the audit_logs table.
+// It runs after the handler completes (deferred write), so it captures
+// the full request lifecycle including errors and duration.
+func Audit(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip audit for health/metadata endpoints
+		path := c.Request.URL.Path
+		if path == "/api/health" || path == "/api/metadata/datasets" {
+			c.Next()
+			return
+		}
+
+		requestID := uuid.New()
+		start := time.Now()
+
+		// Inject request ID for downstream use
+		c.Set(AuditRequestIDKey, requestID)
+
+		c.Next()
+
+		// Collect audit data set by handlers
+		duration := time.Since(start).Milliseconds()
+		question, _ := c.Get(AuditQuestionKey)
+		mode, _ := c.Get(AuditModeKey)
+		status, _ := c.Get(AuditStatusKey)
+		errMsg, _ := c.Get(AuditErrorKey)
+		rowCount, _ := c.Get(AuditRowCountKey)
+		planRaw, _ := c.Get(AuditPlanKey)
+		sqlExec, _ := c.Get(AuditSQLKey)
+		userToken, _ := c.Get("user_token")
+
+		// Default values
+		questionStr, _ := question.(string)
+		modeStr, _ := mode.(string)
+		statusStr, _ := status.(string)
+		errStr, _ := errMsg.(string)
+		rowCountInt, _ := rowCount.(int)
+		sqlStr, _ := sqlExec.(string)
+		userStr, _ := userToken.(string)
+
+		if statusStr == "" {
+			statusStr = "success"
+		}
+		if questionStr == "" || modeStr == "" {
+			return // Not a query request, skip
+		}
+
+		// Serialize plan if present
+		var planJSON []byte
+		if planRaw != nil {
+			planJSON, _ = json.Marshal(planRaw)
+		}
+
+		go func() {
+			var err error
+			if planJSON != nil {
+				_, err = db.Exec(`
+					INSERT INTO audit_logs
+						(request_id, user_token, question, mode, query_plan, sql_executed, status, error_message, row_count, duration_ms)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+					requestID, userStr, questionStr, modeStr, planJSON, sqlStr, statusStr, errStr, rowCountInt, duration,
+				)
+			} else {
+				_, err = db.Exec(`
+					INSERT INTO audit_logs
+						(request_id, user_token, question, mode, sql_executed, status, error_message, row_count, duration_ms)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+					requestID, userStr, questionStr, modeStr, sqlStr, statusStr, errStr, rowCountInt, duration,
+				)
+			}
+			if err != nil {
+				log.Printf("[AUDIT] Failed to write audit log: %v", err)
+			}
+		}()
+	}
+}
