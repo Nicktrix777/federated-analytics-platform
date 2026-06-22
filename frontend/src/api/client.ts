@@ -3,7 +3,7 @@ import type { QueryResponse, HistoryEntry, DatasetMeta } from "../types";
 
 // The frontend ONLY talks to the Core API.
 // It never directly contacts the AI Engine, Query Service, Trino, or any database.
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8081";
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const API_TOKEN = import.meta.env.VITE_API_TOKEN || "poc-demo-token-2024";
 
 const client = axios.create({

@@ -50,9 +50,16 @@ func main() {
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.HandleMethodNotAllowed = true
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 	r.Use(middleware.CORS())
+	r.NoMethod(func(c *gin.Context) {
+		c.JSON(http.StatusMethodNotAllowed, gin.H{
+			"error":   "method not allowed",
+			"details": "Use POST for /api/query.",
+		})
+	})
 
 	// Public routes (no auth)
 	r.GET("/api/health", healthHandler.HandleHealth)
