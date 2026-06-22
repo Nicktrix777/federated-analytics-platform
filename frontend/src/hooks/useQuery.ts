@@ -41,11 +41,20 @@ export function useQuery() {
           response?: { data?: { error?: string; details?: string } };
           message?: string;
         };
-        const errorMsg =
-          error.response?.data?.error ||
-          error.response?.data?.details ||
-          error.message ||
-          "Query failed";
+        
+        let errorMsg = error.message || "Query failed";
+        if (error.response?.data) {
+          const apiErr = error.response.data.error;
+          const details = error.response.data.details;
+          if (apiErr && details) {
+            errorMsg = `${apiErr}: ${details}`;
+          } else if (apiErr) {
+            errorMsg = apiErr;
+          } else if (details) {
+            errorMsg = details;
+          }
+        }
+
         setState((prev) => ({
           ...prev,
           status: "error",

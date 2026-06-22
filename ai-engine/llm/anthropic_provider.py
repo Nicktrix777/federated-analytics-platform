@@ -74,7 +74,7 @@ class AnthropicProvider(BaseLLMProvider):
 
         response = await self.client.messages.create(
             model=self.model,
-            max_tokens=2000,
+            max_tokens=4000,
             system=system_prompt,
             tools=[QUERY_PLAN_TOOL],
             tool_choice={"type": "tool", "name": "submit_query_plan"},  # Force tool use

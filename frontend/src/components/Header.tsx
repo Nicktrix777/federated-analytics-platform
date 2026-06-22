@@ -5,34 +5,64 @@ interface HeaderProps {
   aiEnabled: boolean;
   onToggleAI: (enabled: boolean) => void;
   datasets: DatasetMeta[];
+  onNewQuery: () => void;
+  onToggleUpload: () => void;
+  showUpload: boolean;
 }
 
-const Header: React.FC<HeaderProps> = ({ aiEnabled, onToggleAI, datasets }) => {
+const Header: React.FC<HeaderProps> = ({
+  aiEnabled,
+  onToggleAI,
+  datasets,
+  onNewQuery,
+  onToggleUpload,
+  showUpload,
+}) => {
   return (
     <header className="header">
       <div className="header-left">
         <div className="logo">
-          <span className="logo-icon">⬡</span>
+          <span className="logo-mark">F</span>
           <div>
             <h1 className="logo-title">FederateIQ</h1>
-            <span className="logo-subtitle">Federated Analytics Platform</span>
+            <span className="logo-subtitle">Federated Analytics</span>
           </div>
         </div>
 
-        <div className="source-badges">
-          {datasets.map((ds) => (
-            <span
-              key={ds.id}
-              className={`source-badge source-badge--${ds.source_type}`}
-            >
-              <span className="source-badge-dot" />
-              {ds.source_type === "postgresql" ? "🐘" : "🍃"} {ds.name}
-            </span>
-          ))}
-        </div>
+        {datasets.length > 0 && (
+          <div className="source-badges">
+            {datasets.map((ds) => (
+              <span
+                key={ds.id}
+                className={`source-badge source-badge--${ds.source_type}`}
+              >
+                <span className="source-badge-dot" />
+                {ds.source_type === "postgresql" ? "🐘" : "🍃"} {ds.name}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="header-right">
+        <button
+          id="upload-btn"
+          className={`header-btn ${showUpload ? "header-btn--active" : ""}`}
+          onClick={onToggleUpload}
+          title="Upload a CSV or Excel file"
+        >
+          ↑ Upload
+        </button>
+
+        <button
+          id="new-query-btn"
+          className="header-btn header-btn--primary"
+          onClick={onNewQuery}
+          title="Clear results and start a new query"
+        >
+          + New Query
+        </button>
+
         <div
           className="ai-toggle"
           title={
@@ -41,7 +71,7 @@ const Header: React.FC<HeaderProps> = ({ aiEnabled, onToggleAI, datasets }) => {
               : "AI mode disabled — click to enable"
           }
         >
-          <span className="ai-toggle-label">AI Engine</span>
+          <span className="ai-toggle-label">AI</span>
           <button
             id="ai-toggle-btn"
             className={`toggle-btn ${aiEnabled ? "toggle-btn--on" : "toggle-btn--off"}`}
@@ -50,16 +80,11 @@ const Header: React.FC<HeaderProps> = ({ aiEnabled, onToggleAI, datasets }) => {
           >
             <span className="toggle-knob" />
           </button>
-          <span
-            className={`ai-status ${aiEnabled ? "ai-status--on" : "ai-status--off"}`}
-          >
-            {aiEnabled ? "ON" : "OFF"}
-          </span>
         </div>
 
         <div className="connection-indicator" title="Connected to Core API">
           <span className="connection-dot" />
-          <span>Connected</span>
+          <span>Live</span>
         </div>
       </div>
     </header>

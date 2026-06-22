@@ -63,7 +63,6 @@ const ResultsTable: React.FC<ResultsTableProps> = ({
     return (
       <div className="card">
         <div className="empty-state">
-          <span className="empty-icon">📋</span>
           <span>No results returned</span>
         </div>
       </div>
@@ -74,7 +73,6 @@ const ResultsTable: React.FC<ResultsTableProps> = ({
     <div className="card results-table-card">
       <div className="card-header">
         <div className="card-title">
-          <span className="section-title-icon">📋</span>
           <span className="section-title">Results</span>
           <span className="badge">{rowCount.toLocaleString()} rows</span>
         </div>

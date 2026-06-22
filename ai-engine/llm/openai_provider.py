@@ -33,7 +33,8 @@ class OpenAIProvider(BaseLLMProvider):
             ],
             response_format={"type": "json_object"},  # Structured JSON output
             temperature=0.1,  # Low temperature for deterministic SQL generation
-            max_tokens=2000,
+            max_tokens=4000,
+
         )
 
         raw_content = response.choices[0].message.content

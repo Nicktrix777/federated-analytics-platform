@@ -36,16 +36,20 @@ func main() {
 	defer db.Close()
 	log.Println("Connected to metadata database")
 
-	// ── Services ─────────────────────────────────────────────
+	// ── Services ────────────────────────────────────
 	aiClient := services.NewAIClient(cfg.AIEngineURL)
 	queryClient := services.NewQueryClient(cfg.QueryServiceURL)
 	metadataSvc := services.NewMetadataService(db)
+	uploadSvc := services.NewUploadService(cfg.SourceDSN, db)
 
-	// ── Handlers ─────────────────────────────────────────────
+
+	// ── Handlers ────────────────────────────────────
 	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, cfg.AIEnabled)
 	healthHandler := handlers.NewHealthHandler(cfg.AIEnabled)
 	historyHandler := handlers.NewHistoryHandler(db)
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
+	uploadHandler := handlers.NewUploadHandler(uploadSvc, cfg.AIEngineURL)
+
 
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
@@ -72,6 +76,8 @@ func main() {
 		api.POST("/query", queryHandler.HandleQuery)
 		api.GET("/history", historyHandler.HandleHistory)
 		api.GET("/metadata/datasets", metadataHandler.HandleDatasets)
+		api.POST("/upload", uploadHandler.HandleUpload)
+		api.GET("/upload/status/:table", uploadHandler.HandleUploadStatus)
 	}
 
 	// ── HTTP Server with Graceful Shutdown ────────────────────

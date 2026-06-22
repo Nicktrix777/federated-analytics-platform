@@ -1,35 +1,61 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
 import type { QueryMode, QueryStatus } from "../types";
+
+export interface QueryInputHandle {
+  insertText: (text: string) => void;
+  setQuery: (text: string, mode?: QueryMode) => void;
+}
 
 interface QueryInputProps {
   onSubmit: (question: string, mode: QueryMode) => void;
   status: QueryStatus;
   aiEnabled: boolean;
+  hasResults?: boolean;
+  onNewQuery?: () => void;
 }
 
 const EXAMPLE_QUESTIONS = [
-  "SELECT * FROM postgres_source.public.orders LIMIT 10",
-  "What are the top 5 products by total sales?",
-  "Show me monthly revenue for this year",
-  "Which region has the highest average order value?",
-  "Compare product categories by total orders and revenue",
+  "Show total tasks per department with completion rate",
+  "Who are the top 3 highest paid employees in each department?",
+  "Which employees prefer remote work and what is their task completion rate?",
+  "Show average performance score per department ordered by score",
 ];
 
-const QueryInput: React.FC<QueryInputProps> = ({
+const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
   onSubmit,
   status,
   aiEnabled,
-}) => {
+  hasResults = false,
+  onNewQuery,
+}, ref) => {
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState<QueryMode>(aiEnabled ? "ai" : "sql");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isLoading = status === "loading";
 
-  // Sync mode with aiEnabled flag
+  useImperativeHandle(ref, () => ({
+    insertText: (text: string) => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const start = el.selectionStart ?? question.length;
+      const end   = el.selectionEnd   ?? question.length;
+      const newVal = question.slice(0, start) + text + question.slice(end);
+      setQuestion(newVal);
+      el.focus();
+      // Restore cursor position after the inserted text
+      setTimeout(() => {
+        el.setSelectionRange(start + text.length, start + text.length);
+      }, 0);
+    },
+    setQuery: (text: string, newMode?: QueryMode) => {
+      setQuestion(text);
+      if (newMode) setMode(newMode);
+      textareaRef.current?.focus();
+    },
+  }));
+
   useEffect(() => {
-    if (!aiEnabled && mode === "ai") {
-      setMode("sql");
-    }
+    if (!aiEnabled && mode === "ai") setMode("sql");
   }, [aiEnabled, mode]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -46,7 +72,6 @@ const QueryInput: React.FC<QueryInputProps> = ({
 
   const handleExampleClick = (example: string) => {
     setQuestion(example);
-    // Auto-detect mode from example
     const looksLikeSQL =
       example.trim().toUpperCase().startsWith("SELECT") ||
       example.trim().toUpperCase().startsWith("WITH");
@@ -56,32 +81,34 @@ const QueryInput: React.FC<QueryInputProps> = ({
   };
 
   return (
-    <div className="query-input-card">
+    <div className={`query-input-card ${hasResults ? "query-input-card--compact" : ""}`}>
+      {hasResults && (
+        <div className="refine-bar">
+          <span className="refine-label">Refine or</span>
+          <button className="refine-new-btn" onClick={onNewQuery} type="button">
+            start fresh →
+          </button>
+        </div>
+      )}
+
       <div className="query-input-header">
-        <h2 className="section-title">
-          <span className="section-title-icon">💬</span>
-          Ask a Question
-        </h2>
-        <div className="mode-toggle">
+        {!hasResults && <h2 className="section-title">Query</h2>}
+        <div className="mode-toggle" style={hasResults ? { marginLeft: "auto" } : {}}>
           <button
             id="mode-ai-btn"
             className={`mode-btn ${mode === "ai" ? "mode-btn--active" : ""}`}
             onClick={() => aiEnabled && setMode("ai")}
             disabled={!aiEnabled}
-            title={
-              !aiEnabled
-                ? "Enable AI Engine in the header to use AI mode"
-                : "AI-powered natural language"
-            }
+            title={!aiEnabled ? "Enable AI Engine in header to use AI mode" : "Natural language"}
           >
-            <span>🤖</span> AI Mode
+            AI
           </button>
           <button
             id="mode-sql-btn"
             className={`mode-btn ${mode === "sql" ? "mode-btn--active" : ""}`}
             onClick={() => setMode("sql")}
           >
-            <span>⌨️</span> SQL Mode
+            SQL
           </button>
         </div>
       </div>
@@ -97,59 +124,50 @@ const QueryInput: React.FC<QueryInputProps> = ({
             onKeyDown={handleKeyDown}
             placeholder={
               mode === "ai"
-                ? 'Ask anything about your data... e.g., "What are the top 5 products by revenue?"'
-                : "Enter Trino SQL... e.g., SELECT * FROM postgres_source.public.orders LIMIT 10"
+                ? hasResults
+                  ? "Refine your analysis…"
+                  : 'Ask anything… e.g., "What are the top 5 products by revenue?"'
+                : "Trino SQL… e.g., SELECT * FROM postgres_source.public.orders LIMIT 10"
             }
-            rows={4}
+            rows={hasResults ? 2 : 4}
             disabled={isLoading}
             spellCheck={mode === "ai"}
           />
-          {mode === "ai" && (
-            <div className="textarea-badge">
-              <span>🤖 AI</span>
-            </div>
-          )}
         </div>
 
         <div className="query-actions">
-          <div className="example-chips">
-            <span className="example-label">Examples:</span>
-            {EXAMPLE_QUESTIONS.slice(0, 3).map((ex, i) => (
-              <button
-                key={i}
-                type="button"
-                className="example-chip"
-                onClick={() => handleExampleClick(ex)}
-                disabled={isLoading}
-              >
-                {ex.length > 40 ? ex.slice(0, 40) + "…" : ex}
-              </button>
-            ))}
-          </div>
+          {!hasResults && (
+            <div className="example-chips">
+              <span className="example-label">Try:</span>
+              {EXAMPLE_QUESTIONS.slice(0, 3).map((ex, i) => (
+                <button
+                  key={i} type="button" className="example-chip"
+                  onClick={() => handleExampleClick(ex)}
+                  disabled={isLoading}
+                >
+                  {ex.length > 36 ? ex.slice(0, 36) + "…" : ex}
+                </button>
+              ))}
+            </div>
+          )}
 
           <button
-            id="submit-query-btn"
-            type="submit"
+            id="submit-query-btn" type="submit"
             className={`submit-btn ${isLoading ? "submit-btn--loading" : ""}`}
             disabled={!question.trim() || isLoading}
+            style={hasResults ? { marginLeft: "auto" } : {}}
           >
             {isLoading ? (
-              <>
-                <span className="spinner" />
-                Executing...
-              </>
+              <><span className="spinner" />Running…</>
             ) : (
-              <>
-                <span>▶</span>
-                Run Query
-                <kbd>⌘↵</kbd>
-              </>
+              <><span className="submit-arrow">▶</span>{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
             )}
           </button>
         </div>
       </form>
     </div>
   );
-};
+});
 
+QueryInput.displayName = "QueryInput";
 export default QueryInput;

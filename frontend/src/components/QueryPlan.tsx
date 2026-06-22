@@ -39,14 +39,13 @@ const QueryPlanView: React.FC<QueryPlanProps> = ({
         style={{ cursor: "pointer" }}
       >
         <div className="card-title">
-          <span>{expanded ? "▼" : "▶"}</span>
-          <span className="section-title-icon">🧠</span>
+          <span>{expanded ? "▾" : "▸"}</span>
           <span className="section-title">Query Plan</span>
           {mode === "ai" && (
-            <span className="badge badge--ai">AI Generated</span>
+            <span className="badge badge--ai">AI</span>
           )}
           {mode === "sql" && (
-            <span className="badge badge--sql">Direct SQL</span>
+            <span className="badge badge--sql">SQL</span>
           )}
         </div>
         <div className="plan-stats">
@@ -59,8 +58,8 @@ const QueryPlanView: React.FC<QueryPlanProps> = ({
               <span>{confidencePct}% confident</span>
             </div>
           )}
-          <span className="stat-chip">⚡ {executionTimeMs}ms</span>
-          <span className="stat-chip">📊 {rowCount} rows</span>
+          <span className="stat-chip">{executionTimeMs}ms</span>
+          <span className="stat-chip">{rowCount} rows</span>
         </div>
       </div>
 
@@ -68,7 +67,6 @@ const QueryPlanView: React.FC<QueryPlanProps> = ({
         <div className="card-body">
           {plan.explanation && (
             <div className="plan-explanation">
-              <span className="plan-explanation-icon">💡</span>
               {plan.explanation}
             </div>
           )}

@@ -125,6 +125,9 @@ services:
       POSTGRES_META_DB: analytics_meta
       POSTGRES_META_USER: meta_user
       POSTGRES_META_PASSWORD: meta_pass_2024
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+
     ports:
       - "8082:8082"
     networks:
@@ -132,12 +135,15 @@ services:
     depends_on:
       postgres-meta:
         condition: service_healthy
+      trino:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8082/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
+
 
   # ──────────────────────────────────────────────
   # QUERY SERVICE (Go)
@@ -186,6 +192,12 @@ services:
       POSTGRES_META_DB: analytics_meta
       POSTGRES_META_USER: meta_user
       POSTGRES_META_PASSWORD: meta_pass_2024
+      POSTGRES_SOURCE_HOST: postgres-source
+      POSTGRES_SOURCE_PORT: 5432
+      POSTGRES_SOURCE_DB: ${POSTGRES_SOURCE_DB:-source_db}
+      POSTGRES_SOURCE_USER: ${POSTGRES_SOURCE_USER:-source_user}
+      POSTGRES_SOURCE_PASSWORD: ${POSTGRES_SOURCE_PASSWORD:-source_pass_2024}
+
     ports:
       - "8081:8081"
     networks:

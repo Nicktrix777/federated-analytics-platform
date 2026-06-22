@@ -27,7 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from models import PlanRequest, QueryPlan, ErrorResponse
 from prompt_builder import build_system_prompt, build_user_prompt
-from metadata_client import get_datasets
+from metadata_client import get_datasets, invalidate_metadata_cache
+
 from llm.base import BaseLLMProvider
 
 logging.basicConfig(
@@ -173,6 +174,19 @@ async def generate_plan(request: PlanRequest) -> QueryPlan:
             status_code=502,
             detail=f"LLM provider call failed: {str(e)}",
         )
+
+
+
+# ── Cache Invalidation ─────────────────────────────────────────
+@app.post("/api/invalidate-cache")
+async def invalidate_cache_endpoint():
+    """
+    Force metadata cache refresh.
+    Called by Core API after a CSV/Excel upload creates a new table
+    so the AI Engine immediately knows about the new data source.
+    """
+    invalidate_metadata_cache()
+    return {"status": "cache invalidated", "message": "Next plan request will re-fetch all schemas"}
 
 
 if __name__ == "__main__":

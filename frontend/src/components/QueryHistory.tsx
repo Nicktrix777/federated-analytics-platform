@@ -21,14 +21,12 @@ const QueryHistory: React.FC<QueryHistoryProps> = ({ history, onSelect }) => {
   return (
     <aside className="history-panel">
       <div className="history-header">
-        <span className="section-title-icon">🕐</span>
-        <span className="section-title">Query History</span>
+        <span className="section-title">History</span>
         <span className="badge">{history.length}</span>
       </div>
 
       {history.length === 0 ? (
         <div className="history-empty">
-          <span className="empty-icon">📭</span>
           <span>No queries yet</span>
         </div>
       ) : (
