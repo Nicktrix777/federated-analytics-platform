@@ -2,21 +2,21 @@ import React from "react";
 import type { DatasetMeta } from "../types";
 
 interface HeaderProps {
-  aiEnabled: boolean;
-  onToggleAI: (enabled: boolean) => void;
-  datasets: DatasetMeta[];
-  onNewQuery: () => void;
-  onToggleUpload: () => void;
-  showUpload: boolean;
+  aiEnabled?: boolean;
+  onToggleAI?: (enabled: boolean) => void;
+  datasets?: DatasetMeta[];
+  onNewQuery?: () => void;
+  onToggleUpload?: () => void;
+  showUpload?: boolean;
 }
 
 const Header: React.FC<HeaderProps> = ({
-  aiEnabled,
+  aiEnabled = true,
   onToggleAI,
-  datasets,
+  datasets = [],
   onNewQuery,
   onToggleUpload,
-  showUpload,
+  showUpload = false,
 }) => {
   return (
     <header className="header">
@@ -45,42 +45,48 @@ const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="header-right">
-        <button
-          id="upload-btn"
-          className={`header-btn ${showUpload ? "header-btn--active" : ""}`}
-          onClick={onToggleUpload}
-          title="Upload a CSV or Excel file"
-        >
-          ↑ Upload
-        </button>
-
-        <button
-          id="new-query-btn"
-          className="header-btn header-btn--primary"
-          onClick={onNewQuery}
-          title="Clear results and start a new query"
-        >
-          + New Query
-        </button>
-
-        <div
-          className="ai-toggle"
-          title={
-            aiEnabled
-              ? "AI mode enabled — click to disable"
-              : "AI mode disabled — click to enable"
-          }
-        >
-          <span className="ai-toggle-label">AI</span>
+        {onToggleUpload && (
           <button
-            id="ai-toggle-btn"
-            className={`toggle-btn ${aiEnabled ? "toggle-btn--on" : "toggle-btn--off"}`}
-            onClick={() => onToggleAI(!aiEnabled)}
-            aria-label={`AI Engine ${aiEnabled ? "enabled" : "disabled"}`}
+            id="upload-btn"
+            className={`header-btn ${showUpload ? "header-btn--active" : ""}`}
+            onClick={onToggleUpload}
+            title="Upload a CSV or Excel file"
           >
-            <span className="toggle-knob" />
+            ↑ Upload
           </button>
-        </div>
+        )}
+
+        {onNewQuery && (
+          <button
+            id="new-query-btn"
+            className="header-btn header-btn--primary"
+            onClick={onNewQuery}
+            title="Clear results and start a new query"
+          >
+            + New Query
+          </button>
+        )}
+
+        {onToggleAI && (
+          <div
+            className="ai-toggle"
+            title={
+              aiEnabled
+                ? "AI mode enabled — click to disable"
+                : "AI mode disabled — click to enable"
+            }
+          >
+            <span className="ai-toggle-label">AI</span>
+            <button
+              id="ai-toggle-btn"
+              className={`toggle-btn ${aiEnabled ? "toggle-btn--on" : "toggle-btn--off"}`}
+              onClick={() => onToggleAI(!aiEnabled)}
+              aria-label={`AI Engine ${aiEnabled ? "enabled" : "disabled"}`}
+            >
+              <span className="toggle-knob" />
+            </button>
+          </div>
+        )}
 
         <div className="connection-indicator" title="Connected to Core API">
           <span className="connection-dot" />

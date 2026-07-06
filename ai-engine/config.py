@@ -3,21 +3,15 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # LLM provider selection
-    llm_provider: str = Field(
-        default="openai", description="LLM provider: 'openai' or 'anthropic'"
+    # LLM provider — always gpt-4o via deepagents model string
+    llm_model: str = Field(
+        default="openai:gpt-4o",
+        description="deepagents model string e.g. 'openai:gpt-4o' or 'anthropic:claude-sonnet-4-6'"
     )
 
-    # OpenAI settings
+    # Still needed for the underlying langchain provider
     openai_api_key: str = Field(default="", description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4o", description="OpenAI model name")
-
-
-    # Anthropic settings
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
-    anthropic_model: str = Field(
-        default="claude-3-5-sonnet-20241022", description="Claude model name"
-    )
 
     # PostgreSQL metadata DB
     postgres_meta_host: str = Field(default="localhost")

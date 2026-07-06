@@ -27,7 +27,7 @@ func NewAIClient(baseURL string) *AIClient {
 	return &AIClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second, // LLM calls can be slow
+			Timeout: 300 * time.Second, // Multi-agent pipeline makes 8-10 LLM calls; allow up to 5 min
 		},
 	}
 }

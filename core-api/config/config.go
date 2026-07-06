@@ -14,8 +14,9 @@ type Config struct {
 	APIAuthToken    string
 	DatabaseDSN     string // postgres-meta (metadata + audit)
 	SourceDSN       string // postgres-source (user data + uploads)
+	TrinoHost       string // for schema refresh via Trino REST API
+	TrinoPort       string
 }
-
 
 // Load reads configuration from environment variables.
 func Load() *Config {
@@ -35,7 +36,6 @@ func Load() *Config {
 		pgHost, pgPort, pgDB, pgUser, pgPass,
 	)
 
-	// postgres-source DSN (for CSV upload table creation)
 	srcHost := getEnv("POSTGRES_SOURCE_HOST", "postgres-source")
 	srcPort := getEnv("POSTGRES_SOURCE_PORT", "5432")
 	srcDB := getEnv("POSTGRES_SOURCE_DB", "source_db")
@@ -55,9 +55,10 @@ func Load() *Config {
 		APIAuthToken:    getEnv("API_AUTH_TOKEN", "poc-demo-token-2024"),
 		DatabaseDSN:     dsn,
 		SourceDSN:       sourceDSN,
+		TrinoHost:       getEnv("TRINO_HOST", "trino"),
+		TrinoPort:       getEnv("TRINO_PORT", "8080"),
 	}
 }
-
 
 func getEnv(key, defaultValue string) string {
 	if val := os.Getenv(key); val != "" {

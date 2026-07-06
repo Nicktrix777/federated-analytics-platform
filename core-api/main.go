@@ -23,7 +23,7 @@ import (
 func main() {
 	cfg := config.Load()
 
-	log.Printf("Starting Federated Analytics Platform — Core API")
+	log.Printf("Starting Federated Analytics Platform — Core API v2")
 	log.Printf("AI Enabled: %v", cfg.AIEnabled)
 	log.Printf("AI Engine URL: %s", cfg.AIEngineURL)
 	log.Printf("Query Service URL: %s", cfg.QueryServiceURL)
@@ -41,7 +41,10 @@ func main() {
 	queryClient := services.NewQueryClient(cfg.QueryServiceURL)
 	metadataSvc := services.NewMetadataService(db)
 	uploadSvc := services.NewUploadService(cfg.SourceDSN, db)
-
+	dataSourceSvc := services.NewDataSourceService(
+		db, cfg.TrinoHost, cfg.TrinoPort, cfg.AIEngineURL,
+	)
+	dashboardSvc := services.NewDashboardService(db)
 
 	// ── Handlers ────────────────────────────────────
 	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, cfg.AIEnabled)
@@ -49,7 +52,8 @@ func main() {
 	historyHandler := handlers.NewHistoryHandler(db)
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
 	uploadHandler := handlers.NewUploadHandler(uploadSvc, cfg.AIEngineURL)
-
+	dataSourceHandler := handlers.NewDataSourceHandler(dataSourceSvc)
+	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc)
 
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
@@ -61,7 +65,7 @@ func main() {
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
 			"error":   "method not allowed",
-			"details": "Use POST for /api/query.",
+			"details": "Check the allowed HTTP methods for this endpoint.",
 		})
 	})
 
@@ -73,11 +77,35 @@ func main() {
 	api.Use(middleware.Auth(cfg.APIAuthToken))
 	api.Use(middleware.Audit(db))
 	{
+		// ── Query & History ─────────────────────────────────
 		api.POST("/query", queryHandler.HandleQuery)
 		api.GET("/history", historyHandler.HandleHistory)
+
+		// ── Metadata & Upload ───────────────────────────────
 		api.GET("/metadata/datasets", metadataHandler.HandleDatasets)
 		api.POST("/upload", uploadHandler.HandleUpload)
 		api.GET("/upload/status/:table", uploadHandler.HandleUploadStatus)
+
+		// ── Data Sources (NEW) ──────────────────────────────
+		// Register external connections (Postgres, ES, Mongo, etc.)
+		// and auto-fetch their schemas for AI prompts
+		api.GET("/datasources", dataSourceHandler.HandleList)
+		api.POST("/datasources", dataSourceHandler.HandleCreate)
+		api.GET("/datasources/:id", dataSourceHandler.HandleGet)
+		api.PUT("/datasources/:id", dataSourceHandler.HandleUpdate)
+		api.DELETE("/datasources/:id", dataSourceHandler.HandleDelete)
+		api.POST("/datasources/:id/refresh", dataSourceHandler.HandleRefreshSchema)
+		api.POST("/datasources/refresh-all", dataSourceHandler.HandleRefreshAll)
+
+		// ── Dashboards (NEW) ────────────────────────────────
+		api.GET("/dashboards", dashboardHandler.HandleList)
+		api.POST("/dashboards", dashboardHandler.HandleCreate)
+		api.GET("/dashboards/:id", dashboardHandler.HandleGet)
+		api.PUT("/dashboards/:id", dashboardHandler.HandleUpdate)
+		api.DELETE("/dashboards/:id", dashboardHandler.HandleDelete)
+		api.POST("/dashboards/:id/widgets", dashboardHandler.HandleCreateWidget)
+		api.PUT("/dashboards/:id/widgets/:wid", dashboardHandler.HandleUpdateWidget)
+		api.DELETE("/dashboards/:id/widgets/:wid", dashboardHandler.HandleDeleteWidget)
 	}
 
 	// ── HTTP Server with Graceful Shutdown ────────────────────
@@ -85,7 +113,7 @@ func main() {
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      r,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: 310 * time.Second, // Must exceed AI client timeout (300s) to avoid premature disconnect
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -102,7 +130,6 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down Core API...")
-	// Give 10 seconds for in-flight requests to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -119,8 +146,8 @@ func connectDB(dsn string) (*sql.DB, error) {
 		db, err = sql.Open("postgres", dsn)
 		if err == nil {
 			if pingErr := db.Ping(); pingErr == nil {
-				db.SetMaxOpenConns(10)
-				db.SetMaxIdleConns(5)
+				db.SetMaxOpenConns(25)
+				db.SetMaxIdleConns(10)
 				db.SetConnMaxLifetime(5 * time.Minute)
 				return db, nil
 			}

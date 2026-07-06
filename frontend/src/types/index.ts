@@ -1,4 +1,44 @@
-// ── Shared Types ─────────────────────────────────────────────
+// ── Shared Types — Federated Analytics Platform v2 ───────────
+
+// ── Data Sources ─────────────────────────────────────────────
+
+export interface DataSource {
+  id: number;
+  name: string;
+  source_type: "postgresql" | "mongodb" | "elasticsearch" | "mysql" | "trino";
+  host: string;
+  port: number;
+  database_name: string;
+  username?: string;
+  extra_config?: string;
+  trino_catalog: string;
+  is_active: boolean;
+  schema_cache?: string;
+  last_schema_refresh?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDataSourcePayload {
+  name: string;
+  source_type: string;
+  host: string;
+  port: number;
+  database_name: string;
+  username?: string;
+  password?: string;
+  trino_catalog: string;
+  extra_config?: string;
+}
+
+export interface SchemaRefreshResult {
+  data_source_id: number;
+  trino_catalog: string;
+  tables_found: number;
+  message: string;
+}
+
+// ── Datasets ─────────────────────────────────────────────────
 
 export interface DatasetColumn {
   column_name: string;
@@ -16,6 +56,8 @@ export interface DatasetMeta {
   trino_path: string;
   columns: DatasetColumn[];
 }
+
+// ── Query ─────────────────────────────────────────────────────
 
 export interface QueryStep {
   step_id: number;
@@ -58,3 +100,70 @@ export interface HistoryEntry {
 
 export type QueryMode = "ai" | "sql";
 export type QueryStatus = "idle" | "loading" | "success" | "error";
+
+// ── Dashboards ───────────────────────────────────────────────
+
+export type ChartType =
+  | "table"
+  | "bar"
+  | "line"
+  | "pie"
+  | "area"
+  | "scatter"
+  | "number"
+  | "gauge";
+
+export interface GridPosition {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface DashboardWidget {
+  id: number;
+  dashboard_id: number;
+  title: string;
+  query_sql: string;
+  chart_type: ChartType;
+  chart_config: string; // JSON
+  grid_position: string; // JSON GridPosition
+  refresh_rate_ms: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Dashboard {
+  id: number;
+  name: string;
+  description: string;
+  layout: string; // JSON
+  is_active: boolean;
+  widgets?: DashboardWidget[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDashboardPayload {
+  name: string;
+  description?: string;
+  layout?: string;
+}
+
+export interface CreateWidgetPayload {
+  title: string;
+  query_sql: string;
+  chart_type: ChartType;
+  chart_config?: string;
+  grid_position?: string;
+  refresh_rate_ms?: number;
+}
+
+export interface UpdateWidgetPayload {
+  title?: string;
+  query_sql?: string;
+  chart_type?: ChartType;
+  chart_config?: string;
+  grid_position?: string;
+  refresh_rate_ms?: number;
+}

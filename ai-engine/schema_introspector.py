@@ -28,7 +28,8 @@ from models import DatasetMeta, DatasetColumn
 logger = logging.getLogger(__name__)
 
 # Known catalogs to introspect (exclude system/internal catalogs)
-INTROSPECT_CATALOGS = ["postgres_source", "mongodb"]
+# elasticsearch is now included — Trino's ES connector exposes indices as tables
+INTROSPECT_CATALOGS = ["postgres_source", "mongodb", "elasticsearch"]
 
 # Schemas to skip (system/internal)
 SKIP_SCHEMAS = {

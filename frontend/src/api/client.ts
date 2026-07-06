@@ -1,10 +1,21 @@
 import axios from "axios";
-import type { QueryResponse, HistoryEntry, DatasetMeta } from "../types";
+import type {
+  QueryResponse,
+  HistoryEntry,
+  DatasetMeta,
+  DataSource,
+  CreateDataSourcePayload,
+  SchemaRefreshResult,
+  Dashboard,
+  DashboardWidget,
+  CreateDashboardPayload,
+  CreateWidgetPayload,
+  UpdateWidgetPayload,
+} from "../types";
 
-// The frontend ONLY talks to the Core API.
-// It never directly contacts the AI Engine, Query Service, Trino, or any database.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
-const API_TOKEN = import.meta.env.VITE_API_TOKEN || "poc-demo-token-2024";
+const API_TOKEN =
+  import.meta.env.VITE_API_TOKEN || "poc-demo-token-2024";
 
 const client = axios.create({
   baseURL: BASE_URL,
@@ -12,16 +23,15 @@ const client = axios.create({
     "Content-Type": "application/json",
     Authorization: `Bearer ${API_TOKEN}`,
   },
-  timeout: 120000, // 2 minutes for slow federated queries
+  timeout: 120000,
 });
 
-// ── API Methods ───────────────────────────────────────────────
+// ── Query API ─────────────────────────────────────────────────
 
 export const api = {
-  /** Submit a natural language or raw SQL query */
   query: async (
     question: string,
-    mode: "ai" | "sql",
+    mode: "ai" | "sql"
   ): Promise<QueryResponse> => {
     const response = await client.post<QueryResponse>("/api/query", {
       question,
@@ -30,7 +40,6 @@ export const api = {
     return response.data;
   },
 
-  /** Fetch query history from audit log */
   getHistory: async (limit = 20): Promise<HistoryEntry[]> => {
     const response = await client.get<{
       history: HistoryEntry[];
@@ -39,18 +48,140 @@ export const api = {
     return response.data.history;
   },
 
-  /** Fetch available dataset metadata */
   getDatasets: async (): Promise<DatasetMeta[]> => {
     const response = await client.get<{ datasets: DatasetMeta[] }>(
-      "/api/metadata/datasets",
+      "/api/metadata/datasets"
     );
     return response.data.datasets;
   },
 
-  /** Health check */
   health: async (): Promise<{ status: string; ai_enabled: boolean }> => {
     const response = await client.get("/api/health");
     return response.data;
+  },
+};
+
+// ── Data Sources API ──────────────────────────────────────────
+
+export const dataSourcesApi = {
+  list: async (): Promise<DataSource[]> => {
+    const response = await client.get<{ data_sources: DataSource[] }>(
+      "/api/datasources"
+    );
+    return response.data.data_sources;
+  },
+
+  create: async (
+    payload: CreateDataSourcePayload
+  ): Promise<DataSource> => {
+    const response = await client.post<DataSource>(
+      "/api/datasources",
+      payload
+    );
+    return response.data;
+  },
+
+  get: async (id: number): Promise<DataSource> => {
+    const response = await client.get<DataSource>(`/api/datasources/${id}`);
+    return response.data;
+  },
+
+  update: async (
+    id: number,
+    payload: Partial<CreateDataSourcePayload>
+  ): Promise<DataSource> => {
+    const response = await client.put<DataSource>(
+      `/api/datasources/${id}`,
+      payload
+    );
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
+    await client.delete(`/api/datasources/${id}`);
+  },
+
+  refreshSchema: async (id: number): Promise<SchemaRefreshResult> => {
+    const response = await client.post<SchemaRefreshResult>(
+      `/api/datasources/${id}/refresh`
+    );
+    return response.data;
+  },
+
+  refreshAll: async (): Promise<{
+    refreshed: SchemaRefreshResult[];
+    errors: string[];
+  }> => {
+    const response = await client.post("/api/datasources/refresh-all");
+    return response.data;
+  },
+};
+
+// ── Dashboards API ────────────────────────────────────────────
+
+export const dashboardsApi = {
+  list: async (): Promise<Dashboard[]> => {
+    const response = await client.get<{ dashboards: Dashboard[] }>(
+      "/api/dashboards"
+    );
+    return response.data.dashboards;
+  },
+
+  create: async (payload: CreateDashboardPayload): Promise<Dashboard> => {
+    const response = await client.post<Dashboard>("/api/dashboards", payload);
+    return response.data;
+  },
+
+  get: async (id: number): Promise<Dashboard> => {
+    const response = await client.get<Dashboard>(`/api/dashboards/${id}`);
+    return response.data;
+  },
+
+  update: async (
+    id: number,
+    payload: Partial<CreateDashboardPayload>
+  ): Promise<Dashboard> => {
+    const response = await client.put<Dashboard>(
+      `/api/dashboards/${id}`,
+      payload
+    );
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
+    await client.delete(`/api/dashboards/${id}`);
+  },
+
+  createWidget: async (
+    dashboardId: number,
+    payload: CreateWidgetPayload
+  ): Promise<DashboardWidget> => {
+    const response = await client.post<DashboardWidget>(
+      `/api/dashboards/${dashboardId}/widgets`,
+      payload
+    );
+    return response.data;
+  },
+
+  updateWidget: async (
+    dashboardId: number,
+    widgetId: number,
+    payload: UpdateWidgetPayload
+  ): Promise<DashboardWidget> => {
+    const response = await client.put<DashboardWidget>(
+      `/api/dashboards/${dashboardId}/widgets/${widgetId}`,
+      payload
+    );
+    return response.data;
+  },
+
+  deleteWidget: async (
+    dashboardId: number,
+    widgetId: number
+  ): Promise<void> => {
+    await client.delete(
+      `/api/dashboards/${dashboardId}/widgets/${widgetId}`
+    );
   },
 };
 

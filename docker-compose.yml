@@ -8,12 +8,13 @@ volumes:
   postgres-meta-data:
   postgres-source-data:
   mongo-source-data:
+  elasticsearch-data:
 
 services:
 
   # ──────────────────────────────────────────────
   # METADATA DATABASE (PostgreSQL)
-  # Stores dataset metadata, column info, audit logs
+  # Stores: dataset registry, data_sources, dashboards, audit logs
   # ──────────────────────────────────────────────
   postgres-meta:
     image: postgres:16-alpine
@@ -37,7 +38,6 @@ services:
 
   # ──────────────────────────────────────────────
   # SOURCE DATABASE — PostgreSQL
-  # User-managed: create your own tables/data here
   # ──────────────────────────────────────────────
   postgres-source:
     image: postgres:16-alpine
@@ -60,7 +60,6 @@ services:
 
   # ──────────────────────────────────────────────
   # SOURCE DATABASE — MongoDB
-  # User-managed: create your own collections/data here
   # ──────────────────────────────────────────────
   mongo-source:
     image: mongo:7
@@ -78,8 +77,37 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────
+  # ELASTICSEARCH
+  # New data source — federated via Trino ES connector
+  # Access: http://localhost:9200
+  # ──────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: fap-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - cluster.name=fap-cluster
+      - node.name=fap-node-1
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - federation-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ──────────────────────────────────────────────
   # TRINO — Federated Query Engine
-  # Federates across postgres-source and mongo-source
+  # Federates across Postgres, MongoDB, and Elasticsearch
   # ──────────────────────────────────────────────
   trino:
     image: trinodb/trino:438
@@ -98,6 +126,8 @@ services:
         condition: service_healthy
       mongo-source:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
       interval: 15s
@@ -106,8 +136,8 @@ services:
       start_period: 30s
 
   # ──────────────────────────────────────────────
-  # AI ENGINE SERVICE (Python / FastAPI)
-  # Converts NL questions to structured query plans
+  # AI ENGINE SERVICE (Python / FastAPI + deepagents)
+  # Multi-agent: schema-analyst, sql-generator, sql-validator
   # ──────────────────────────────────────────────
   ai-engine:
     build:
@@ -115,11 +145,9 @@ services:
       dockerfile: Dockerfile
     container_name: fap-ai-engine
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL: ${LLM_MODEL:-openai:gpt-4o}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta
@@ -127,7 +155,6 @@ services:
       POSTGRES_META_PASSWORD: meta_pass_2024
       TRINO_HOST: trino
       TRINO_PORT: 8080
-
     ports:
       - "8082:8082"
     networks:
@@ -144,10 +171,8 @@ services:
       retries: 5
       start_period: 15s
 
-
   # ──────────────────────────────────────────────
   # QUERY SERVICE (Go)
-  # Executes validated query plans against Trino
   # ──────────────────────────────────────────────
   query-service:
     build:
@@ -173,8 +198,7 @@ services:
 
   # ──────────────────────────────────────────────
   # CORE API SERVICE (Go / Gin)
-  # Single entry point for the frontend
-  # Orchestrates AI Engine + Query Service
+  # Now includes: data source management + dashboard builder APIs
   # ──────────────────────────────────────────────
   core-api:
     build:
@@ -197,7 +221,8 @@ services:
       POSTGRES_SOURCE_DB: ${POSTGRES_SOURCE_DB:-source_db}
       POSTGRES_SOURCE_USER: ${POSTGRES_SOURCE_USER:-source_user}
       POSTGRES_SOURCE_PASSWORD: ${POSTGRES_SOURCE_PASSWORD:-source_pass_2024}
-
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
     ports:
       - "8081:8081"
     networks:
@@ -217,6 +242,7 @@ services:
 
   # ──────────────────────────────────────────────
   # FRONTEND (React + TypeScript + Vite / Nginx)
+  # Now includes: Dashboard Builder + Data Sources UI
   # ──────────────────────────────────────────────
   frontend:
     build:
