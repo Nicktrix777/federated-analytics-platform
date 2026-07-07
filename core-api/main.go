@@ -53,7 +53,7 @@ func main() {
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
 	uploadHandler := handlers.NewUploadHandler(uploadSvc, cfg.AIEngineURL)
 	dataSourceHandler := handlers.NewDataSourceHandler(dataSourceSvc)
-	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc)
+	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc, aiClient, queryClient, metadataSvc, cfg.AIEnabled)
 
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
@@ -100,6 +100,8 @@ func main() {
 		// ── Dashboards (NEW) ────────────────────────────────
 		api.GET("/dashboards", dashboardHandler.HandleList)
 		api.POST("/dashboards", dashboardHandler.HandleCreate)
+		api.POST("/dashboards/generate", dashboardHandler.HandleGenerate)
+		api.POST("/dashboards/:id/refine", dashboardHandler.HandleRefine)
 		api.GET("/dashboards/:id", dashboardHandler.HandleGet)
 		api.PUT("/dashboards/:id", dashboardHandler.HandleUpdate)
 		api.DELETE("/dashboards/:id", dashboardHandler.HandleDelete)

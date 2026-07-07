@@ -16,8 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIProvider(BaseLLMProvider):
-    def __init__(self, api_key: str, model: str):
-        self.client = AsyncOpenAI(api_key=api_key)
+    def __init__(self, api_key: str, model: str, max_retries: int = 5, timeout: float = 30.0):
+        # The OpenAI SDK retries 429/5xx internally with exponential backoff
+        # up to max_retries — this is what actually protects the fast path
+        # from rate-limit errors surfacing to the caller.
+        self.client = AsyncOpenAI(api_key=api_key, max_retries=max_retries, timeout=timeout)
         self.model = model
 
     async def generate_plan(
@@ -73,3 +76,40 @@ class OpenAIProvider(BaseLLMProvider):
         )
 
         return plan
+
+    async def repair_sql(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Single-shot repair of one Trino SQL query that failed to execute.
+
+        Returns just the corrected SQL string (JSON mode guarantees a parseable
+        response). Temperature is 0 — repairing a known error is a deterministic
+        correction, not a creative task.
+        """
+        logger.info(f"Calling OpenAI model for SQL repair: {self.model}")
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=2000,
+        )
+
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("OpenAI returned empty repair response")
+
+        try:
+            data = json.loads(raw_content)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"OpenAI repair response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
+            )
+
+        sql = (data.get("sql") or "").strip()
+        if not sql:
+            raise ValueError("Repair response contained no SQL")
+        return sql

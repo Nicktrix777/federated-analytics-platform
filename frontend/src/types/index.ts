@@ -150,6 +150,13 @@ export interface CreateDashboardPayload {
   layout?: string;
 }
 
+// Response from the AI generate/refine endpoints
+export interface AIDashboardResponse {
+  dashboard: Dashboard;
+  explanation: string;
+  confidence: number;
+}
+
 export interface CreateWidgetPayload {
   title: string;
   query_sql: string;

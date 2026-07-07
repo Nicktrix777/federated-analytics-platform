@@ -233,6 +233,44 @@ func (s *DashboardService) UpdateWidget(dashboardID, widgetID int, req models.Up
 	return &w, err
 }
 
+// ReplaceWidgets atomically swaps a dashboard's widgets for a new set.
+// Used by AI refinement, where the designer returns the full updated dashboard.
+func (s *DashboardService) ReplaceWidgets(dashboardID int, widgets []models.CreateWidgetRequest) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM dashboard_widgets WHERE dashboard_id = $1", dashboardID); err != nil {
+		return fmt.Errorf("failed to clear widgets: %w", err)
+	}
+
+	for _, req := range widgets {
+		chartType := req.ChartType
+		if chartType == "" {
+			chartType = "table"
+		}
+		chartConfig := req.ChartConfig
+		if chartConfig == "" {
+			chartConfig = "{}"
+		}
+		gridPos := req.GridPosition
+		if gridPos == "" {
+			gridPos = `{"x":0,"y":0,"w":6,"h":4}`
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO dashboard_widgets
+			    (dashboard_id, title, query_sql, chart_type, chart_config, grid_position, refresh_rate_ms)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
+		`, dashboardID, req.Title, req.QuerySQL, chartType, chartConfig, gridPos, req.RefreshRateMs); err != nil {
+			return fmt.Errorf("failed to insert widget %q: %w", req.Title, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
 // DeleteWidget removes a widget.
 func (s *DashboardService) DeleteWidget(dashboardID, widgetID int) error {
 	_, err := s.db.Exec(

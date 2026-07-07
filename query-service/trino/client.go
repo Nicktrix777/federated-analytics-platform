@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/trinodb/trino-go-client/trino"
@@ -49,6 +50,10 @@ func NewClient() (*Client, error) {
 
 // Execute runs a SELECT query against Trino and returns structured results.
 func (c *Client) Execute(sql string) (columns []string, rows [][]interface{}, err error) {
+	// Trino rejects trailing semicolons ("mismatched input ';'") — strip them
+	// so user-typed SQL ending in ";" doesn't fail.
+	sql = strings.TrimRight(strings.TrimSpace(sql), "; \t\n")
+
 	dbRows, err := c.db.Query(sql)
 	if err != nil {
 		return nil, nil, fmt.Errorf("trino query failed: %w", err)

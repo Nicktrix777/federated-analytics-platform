@@ -137,7 +137,7 @@ services:
 
   # ──────────────────────────────────────────────
   # AI ENGINE SERVICE (Python / FastAPI + deepagents)
-  # Multi-agent: schema-analyst, sql-generator, sql-validator
+  # Multi-agent: schema-analyst, sql-generator (+ deterministic SQL validation)
   # ──────────────────────────────────────────────
   ai-engine:
     build:
@@ -148,6 +148,17 @@ services:
       LLM_MODEL: ${LLM_MODEL:-openai:gpt-4o}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Fast path + resilience tuning (documented in .env.example) — must be
+      # forwarded here or the container falls back to code defaults.
+      FAST_PATH_ENABLED: ${FAST_PATH_ENABLED:-true}
+      FAST_PATH_MODEL: ${FAST_PATH_MODEL:-gpt-4o}
+      FAST_PATH_CONFIDENCE_THRESHOLD: ${FAST_PATH_CONFIDENCE_THRESHOLD:-0.55}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-5}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      AI_MAX_CONCURRENT_PLANS: ${AI_MAX_CONCURRENT_PLANS:-4}
+      AI_QUEUE_TIMEOUT_SECONDS: ${AI_QUEUE_TIMEOUT_SECONDS:-45}
+      SCHEMA_TOOL_CACHE_TTL_SECONDS: ${SCHEMA_TOOL_CACHE_TTL_SECONDS:-60}
+      SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-openai:gpt-4o-mini}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta

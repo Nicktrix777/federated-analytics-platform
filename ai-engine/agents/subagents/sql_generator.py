@@ -27,6 +27,13 @@ Always use the three-part path: catalog.schema.table
 - MongoDB: mongodb.employee_db.collection_name  (NOT "default" for MongoDB)
 - Elasticsearch: elasticsearch.default.index_name
 
+### Exact Column Names (MANDATORY)
+Use ONLY column names that appear verbatim in the provided schema context.
+NEVER invent plausible-sounding names — e.g. departments has "name" (not
+"department_name") and performance_reviews has "score" (not "review_score").
+If the schema context doesn't list a column you need, say so in the
+explanation and lower your confidence instead of guessing.
+
 ### Cross-Source JOINs
 - Trino federates across sources automatically with standard SQL JOINs
 - Type matching is critical: INTEGER in Postgres may be VARCHAR in MongoDB/ES

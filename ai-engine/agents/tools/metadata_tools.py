@@ -8,7 +8,12 @@ generates better, more accurate SQL queries.
 
 import json
 import logging
+
 from langchain_core.tools import tool
+
+from agents.tools._cache import async_ttl_cache
+from agents.tools._common import meta_connection, run_sync
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,30 +26,14 @@ def get_dataset_descriptions() -> str:
     source type, Trino path, and column metadata with sample values.
     Use this to understand what data is available and what each table contains.
     """
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(_async_get_datasets())
-    except RuntimeError:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _async_get_datasets())
-            return future.result()
+    return run_sync(_async_get_datasets())
 
 
+@async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
 async def _async_get_datasets() -> str:
     """Load datasets and columns from postgres-meta."""
-    import asyncpg
-    from config import settings
-
-    dsn = (
-        f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
-        f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
-    )
-
     try:
-        conn = await asyncpg.connect(dsn)
-        try:
+        async with meta_connection() as conn:
             dataset_rows = await conn.fetch("""
                 SELECT id, name, description, source_type,
                        trino_catalog || '.' || trino_schema || '.' || trino_table AS trino_path
@@ -79,9 +68,7 @@ async def _async_get_datasets() -> str:
                     ],
                 })
 
-            return json.dumps(datasets, indent=2)
-        finally:
-            await conn.close()
+        return json.dumps(datasets, indent=2)
     except Exception as e:
         logger.error(f"Failed to fetch dataset metadata: {e}")
         return json.dumps({"error": str(e)})
@@ -95,50 +82,21 @@ def get_table_relationships() -> str:
     including cross-source joins (e.g., PostgreSQL ↔ Elasticsearch).
     Use this to determine the correct join keys when writing multi-table queries.
     """
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(_async_get_relationships())
-    except RuntimeError:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _async_get_relationships())
-            return future.result()
+    return run_sync(_async_get_relationships())
 
 
+@async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
 async def _async_get_relationships() -> str:
     """Load table relationships from postgres-meta."""
-    import asyncpg
-    from config import settings
-
-    dsn = (
-        f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
-        f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
-    )
-
     try:
-        conn = await asyncpg.connect(dsn)
-        try:
-            # Check if the table_relationships table exists
-            exists = await conn.fetchval("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_name = 'table_relationships'
-                )
-            """)
-
-            if not exists:
-                return json.dumps([])
-
+        async with meta_connection() as conn:
             rows = await conn.fetch("""
                 SELECT from_trino_path, from_column, to_trino_path, to_column,
                        join_type, cast_expression, description
                 FROM table_relationships
                 ORDER BY from_trino_path
             """)
-            return json.dumps([dict(r) for r in rows], indent=2)
-        finally:
-            await conn.close()
+        return json.dumps([dict(r) for r in rows], indent=2)
     except Exception as e:
         logger.warning(f"Could not load relationships: {e}")
         return json.dumps([])
@@ -152,30 +110,14 @@ def get_query_history_patterns() -> str:
     Use this to understand what kinds of queries have worked before and
     follow proven patterns for the current data sources.
     """
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(_async_get_patterns())
-    except RuntimeError:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(asyncio.run, _async_get_patterns())
-            return future.result()
+    return run_sync(_async_get_patterns())
 
 
+@async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
 async def _async_get_patterns() -> str:
     """Load recent successful query patterns."""
-    import asyncpg
-    from config import settings
-
-    dsn = (
-        f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
-        f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
-    )
-
     try:
-        conn = await asyncpg.connect(dsn)
-        try:
+        async with meta_connection() as conn:
             rows = await conn.fetch("""
                 SELECT question, sql_executed, row_count
                 FROM audit_logs
@@ -183,9 +125,7 @@ async def _async_get_patterns() -> str:
                 ORDER BY created_at DESC
                 LIMIT 10
             """)
-            return json.dumps([dict(r) for r in rows], indent=2)
-        finally:
-            await conn.close()
+        return json.dumps([dict(r) for r in rows], indent=2)
     except Exception as e:
         logger.warning(f"Could not load query patterns: {e}")
         return json.dumps([])

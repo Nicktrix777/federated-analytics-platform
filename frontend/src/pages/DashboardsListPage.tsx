@@ -11,6 +11,10 @@ export default function DashboardsListPage() {
   const [formName, setFormName] = useState("");
   const [formDesc, setFormDesc] = useState("");
   const [creating, setCreating] = useState(false);
+  const [showAIModal, setShowAIModal] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const loadDashboards = useCallback(async () => {
     try {
@@ -41,6 +45,23 @@ export default function DashboardsListPage() {
     }
   };
 
+  const handleGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGenerating(true);
+    setAiError(null);
+    try {
+      const result = await dashboardsApi.generate(aiPrompt);
+      navigate(`/dashboards/${result.dashboard.id}`);
+    } catch (err) {
+      const detail =
+        (err as { response?: { data?: { error?: string; details?: string } } })
+          .response?.data;
+      setAiError(detail?.details || detail?.error || "Dashboard generation failed. Please try again.");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const handleDelete = async (id: number, name: string) => {
     if (!confirm(`Delete dashboard "${name}"? This will remove all widgets.`)) return;
     await dashboardsApi.delete(id);
@@ -58,9 +79,14 @@ export default function DashboardsListPage() {
             Build custom analytics views from your federated data.
           </p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-          + New Dashboard
-        </button>
+        <div className="dl-header-actions">
+          <button className="btn btn-primary" onClick={() => setShowAIModal(true)}>
+            ✨ Generate with AI
+          </button>
+          <button className="btn btn-ghost" onClick={() => setShowModal(true)}>
+            + New Dashboard
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -118,6 +144,49 @@ export default function DashboardsListPage() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {showAIModal && (
+        <div className="modal-overlay" onClick={() => !generating && setShowAIModal(false)}>
+          <div className="modal-box modal-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>✨ Generate Dashboard with AI</h2>
+              <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
+            </div>
+            <form onSubmit={handleGenerate} className="modal-form">
+              <div className="form-group">
+                <label>Describe the dashboard you want *</label>
+                <textarea
+                  className="form-input"
+                  placeholder={
+                    "e.g. A workforce overview: headcount and average salary KPIs, " +
+                    "salary by department, task completion trends, and top performers."
+                  }
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  rows={4}
+                  required
+                  autoFocus
+                  disabled={generating}
+                />
+              </div>
+              <p className="form-hint">
+                The AI analyzes all registered data sources and schemas, designs the widgets,
+                and writes the queries. You can rearrange everything or refine it with further
+                instructions afterwards.
+              </p>
+              {aiError && <div className="form-error">{aiError}</div>}
+              <div className="modal-footer">
+                <button type="button" className="btn btn-ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={generating || !aiPrompt.trim()}>
+                  {generating ? "Designing dashboard… (up to a minute)" : "Generate Dashboard"}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

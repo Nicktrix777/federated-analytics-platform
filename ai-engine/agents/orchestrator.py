@@ -1,14 +1,19 @@
 """
 Query Planner Orchestrator
 
-The main deepagent that coordinates schema analysis, SQL generation, and validation
-using specialized subagents. Built with deepagents' create_deep_agent.
+The main deepagent that coordinates schema analysis and SQL generation using
+specialized subagents. Built with deepagents' create_deep_agent.
 
 Architecture:
     Orchestrator (deepagent, gpt-4o)
       ├── schema-analyst subagent   → discovers tables from ALL registered sources
-      ├── sql-generator subagent    → writes Trino SQL
-      └── sql-validator subagent    → safety + syntax validation
+      │                               (skipped when pre-loaded context already suffices)
+      └── sql-generator subagent    → writes Trino SQL
+
+SQL safety/Trino-compatibility validation is applied deterministically in
+Python (see agents.tools.validation_tools.validate_and_fix_sql) rather than by
+a dedicated LLM subagent — that checklist doesn't need a model call, and
+dropping it removes 2-3 LLM round trips from every request.
 
 The orchestrator maintains a clean context window by delegating heavy work
 to isolated subagents. Only final outputs flow back to the orchestrator.
@@ -22,12 +27,12 @@ import re
 from typing import Optional
 
 from deepagents import create_deep_agent
+from langchain.chat_models import init_chat_model
 
 from agents.subagents.schema_analyst import SCHEMA_ANALYST_SUBAGENT
 from agents.subagents.sql_generator import SQL_GENERATOR_SUBAGENT
-from agents.subagents.sql_validator import SQL_VALIDATOR_SUBAGENT
 from agents.tools.schema_tools import list_available_sources
-from agents.tools.validation_tools import validate_sql_safety
+from config import settings
 from models import QueryPlan, QueryStep
 
 logger = logging.getLogger(__name__)
@@ -36,27 +41,26 @@ ORCHESTRATOR_SYSTEM_PROMPT = """You are the Query Planner for a Federated Analyt
 
 Your goal is to convert a natural language question into a validated, executable Trino SQL query plan.
 
-## Workflow (ALWAYS follow this order)
+## Workflow
 
-**Step 1 — Schema Discovery (delegate to schema-analyst)**
-Use the schema-analyst subagent to:
-- Discover all registered data sources
-- Identify which tables/indices are relevant to the question
-- Get column details and join relationships
+**Step 1 — Schema Discovery (delegate to schema-analyst, CONDITIONAL)**
+Check the "Additional context" block in the user message first — the Core API often pre-loads
+dataset names, Trino paths, and columns there.
+- If that context already covers every table/column the question needs, SKIP schema-analyst
+  and go straight to Step 2 using the pre-loaded context.
+- If the context is missing, empty, or doesn't cover a data source the question clearly needs,
+  delegate to schema-analyst to discover it before continuing.
 
 **Step 2 — SQL Generation (delegate to sql-generator)**
-Provide the schema context from step 1 to the sql-generator subagent.
+Provide the schema context (pre-loaded or from schema-analyst) to the sql-generator subagent.
 The generator will produce a complete, Trino-compatible SQL query.
 
-**Step 3 — Validation (delegate to sql-validator)**
-Pass the generated SQL to the sql-validator subagent.
-If it finds issues, revise and re-validate once.
-
-**Step 4 — Return the QueryPlan**
-Return a final JSON object in EXACTLY this format:
+**Step 3 — Return the QueryPlan**
+SQL safety and Trino-compatibility checks run automatically after you respond — you do NOT need
+to call a validator subagent. Just return a final JSON object in EXACTLY this format:
 {
   "question": "<original question>",
-  "sql": "<validated Trino SQL>",
+  "sql": "<Trino SQL from sql-generator>",
   "steps": [
     {"step_id": 1, "description": "...", "catalog": "...", "schema_name": "...", "table": "..."}
   ],
@@ -65,8 +69,6 @@ Return a final JSON object in EXACTLY this format:
 }
 
 ## Important Rules
-- NEVER skip the schema-analyst step — data sources may have changed
-- NEVER return SQL that was not validated by sql-validator
 - NEVER generate INSERT, UPDATE, DELETE, or DDL statements
 - If confidence < 0.3, still return the plan with a clear explanation of limitations
 - The response JSON must be the LAST thing you output, with no text after it
@@ -76,21 +78,25 @@ Return a final JSON object in EXACTLY this format:
 def create_query_planner(model: str = "openai:gpt-4o") -> object:
     """
     Create the main query planner deepagent.
-    
+
     Args:
         model: deepagents model string (e.g., 'openai:gpt-4o')
-    
+
     Returns:
         A compiled deepagent graph ready to invoke
     """
+    resolved_model = init_chat_model(
+        model,
+        max_retries=settings.llm_max_retries,
+        timeout=settings.llm_timeout_seconds,
+    )
     return create_deep_agent(
-        model=model,
+        model=resolved_model,
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
-        tools=[list_available_sources, validate_sql_safety],
+        tools=[list_available_sources],
         subagents=[
             SCHEMA_ANALYST_SUBAGENT,
             SQL_GENERATOR_SUBAGENT,
-            SQL_VALIDATOR_SUBAGENT,
         ],
     )
 
@@ -121,34 +127,10 @@ async def generate_query_plan(
     logger.info(f"Invoking query planner for: {question[:100]}")
 
     try:
-        # deepagents/LangGraph agent.invoke() is synchronous — run it in a thread
-        # pool so it doesn't block the uvicorn event loop (which would make the
-        # /health endpoint unresponsive during long LLM pipelines).
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            functools.partial(
-                agent.invoke,
-                {"messages": [{"role": "user", "content": user_message}]},
-            ),
-        )
-
-        # Extract the final message content
-        messages = result.get("messages", [])
-        if not messages:
-            raise ValueError("Agent returned no messages")
-
-        last_message = messages[-1]
-        raw_content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
-
         # Normalize content: the OpenAI Responses API (used by deepagents) returns
         # content as a list of content blocks [{"type": "text", "text": "..."}]
         # rather than a plain string. Flatten to a single string before parsing.
-        content = _normalize_content(raw_content)
+        content = _normalize_content(await run_agent(agent, user_message))
 
         logger.debug(f"Agent output (last 500 chars): {content[-500:]}")
 
@@ -159,6 +141,34 @@ async def generate_query_plan(
     except Exception as e:
         logger.error(f"Query planner failed: {e}", exc_info=True)
         raise ValueError(f"Query planning failed: {e}")
+
+
+async def run_agent(agent, user_message: str):
+    """Invoke a deepagent and return the raw content of its final message.
+
+    deepagents/LangGraph agent.invoke() is synchronous — run it in a thread
+    pool so it doesn't block the uvicorn event loop (which would make the
+    /health endpoint unresponsive during long LLM pipelines).
+    """
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        functools.partial(
+            agent.invoke,
+            {"messages": [{"role": "user", "content": user_message}]},
+        ),
+    )
+
+    messages = result.get("messages", [])
+    if not messages:
+        raise ValueError("Agent returned no messages")
+
+    last_message = messages[-1]
+    return (
+        last_message.content
+        if hasattr(last_message, "content")
+        else str(last_message)
+    )
 
 
 def _normalize_content(content) -> str:
@@ -189,10 +199,10 @@ def _normalize_content(content) -> str:
     return str(content)
 
 
-def _extract_json_plan(content: str) -> dict:
-    """Extract the JSON query plan from the agent's text output."""
+def _extract_json_plan(content: str, required_key: str = "sql") -> dict:
+    """Extract the last JSON object containing required_key from agent output."""
     # Try to find a JSON block in the content
-    # The orchestrator is instructed to end with a raw JSON object
+    # The agent is instructed to end with a raw JSON object
 
     # First, try direct JSON parse
     stripped = content.strip()
@@ -211,15 +221,25 @@ def _extract_json_plan(content: str) -> dict:
             pass
 
     # Try to find the last JSON object in the content
-    json_matches = list(re.finditer(r'\{[^{}]*"sql"[^{}]*\}', content, re.DOTALL))
+    key_pattern = re.escape(f'"{required_key}"')
+    json_matches = list(re.finditer(r'\{[^{}]*' + key_pattern + r'[^{}]*\}', content, re.DOTALL))
     if not json_matches:
         # Try a broader match
-        json_matches = list(re.finditer(r'\{.*?"sql".*?\}', content, re.DOTALL))
+        json_matches = list(re.finditer(r'\{.*?' + key_pattern + r'.*?\}', content, re.DOTALL))
 
     if json_matches:
         last_match = json_matches[-1]
         try:
             return json.loads(last_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # Nested-object fallback: everything from the first "{" to the last "}"
+    # (regex approaches above can't balance braces, e.g. a plan with nested widgets)
+    first, last = content.find("{"), content.rfind("}")
+    if first != -1 and last > first:
+        try:
+            return json.loads(content[first:last + 1])
         except json.JSONDecodeError:
             pass
 

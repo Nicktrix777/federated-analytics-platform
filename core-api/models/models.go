@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -213,6 +214,37 @@ type UpdateWidgetRequest struct {
 	ChartConfig   string `json:"chart_config"`
 	GridPosition  string `json:"grid_position"`
 	RefreshRateMs *int   `json:"refresh_rate_ms"`
+}
+
+// ──────────────────────────────────────────────────────────
+// AI Dashboard Generation
+// ──────────────────────────────────────────────────────────
+
+type GenerateDashboardRequest struct {
+	Prompt string `json:"prompt" binding:"required"`
+}
+
+type RefineDashboardRequest struct {
+	Instruction string `json:"instruction" binding:"required"`
+}
+
+// WidgetPlan is one AI-proposed widget (SQL not yet persisted or executed).
+type WidgetPlan struct {
+	Title        string          `json:"title"`
+	SQL          string          `json:"sql"`
+	ChartType    string          `json:"chart_type"`
+	GridPosition json.RawMessage `json:"grid_position"`
+	Explanation  string          `json:"explanation,omitempty"`
+}
+
+// DashboardPlan is the AI Engine's full dashboard proposal. The Core API
+// validates every widget's SQL before any of it reaches the database.
+type DashboardPlan struct {
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Widgets     []WidgetPlan `json:"widgets"`
+	Confidence  float64      `json:"confidence"`
+	Explanation string       `json:"explanation"`
 }
 
 // ──────────────────────────────────────────────────────────

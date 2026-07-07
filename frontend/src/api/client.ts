@@ -11,6 +11,7 @@ import type {
   CreateDashboardPayload,
   CreateWidgetPayload,
   UpdateWidgetPayload,
+  AIDashboardResponse,
 } from "../types";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -129,6 +130,30 @@ export const dashboardsApi = {
 
   create: async (payload: CreateDashboardPayload): Promise<Dashboard> => {
     const response = await client.post<Dashboard>("/api/dashboards", payload);
+    return response.data;
+  },
+
+  // AI: design a full dashboard from a natural-language brief.
+  // The multi-agent pipeline can take a while — allow up to 5 minutes.
+  generate: async (prompt: string): Promise<AIDashboardResponse> => {
+    const response = await client.post<AIDashboardResponse>(
+      "/api/dashboards/generate",
+      { prompt },
+      { timeout: 300000 }
+    );
+    return response.data;
+  },
+
+  // AI: apply a natural-language instruction to an existing dashboard.
+  refine: async (
+    id: number,
+    instruction: string
+  ): Promise<AIDashboardResponse> => {
+    const response = await client.post<AIDashboardResponse>(
+      `/api/dashboards/${id}/refine`,
+      { instruction },
+      { timeout: 300000 }
+    );
     return response.data;
   },
 

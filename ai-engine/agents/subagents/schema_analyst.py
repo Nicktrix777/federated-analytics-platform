@@ -21,6 +21,17 @@ from agents.tools.metadata_tools import (
     get_dataset_descriptions,
     get_table_relationships,
 )
+from config import settings
+from langchain.chat_models import init_chat_model
+
+# Resolved with the same retry/timeout settings as the orchestrator's main
+# model — a bare model string here would fall back to langchain's default
+# max_retries (2), undermining the Phase 1 rate-limit resilience work.
+_SCHEMA_ANALYST_MODEL = init_chat_model(
+    settings.schema_analyst_model,
+    max_retries=settings.llm_max_retries,
+    timeout=settings.llm_timeout_seconds,
+)
 
 SCHEMA_ANALYST_SYSTEM_PROMPT = """You are a Schema Analyst for a Federated Analytics Platform.
 
@@ -69,6 +80,9 @@ SCHEMA_ANALYST_SUBAGENT = {
         "Use this FIRST before generating any SQL."
     ),
     "system_prompt": SCHEMA_ANALYST_SYSTEM_PROMPT,
+    # Cheap model — this subagent mostly calls tools and summarizes their
+    # output, it doesn't need frontier-model reasoning like sql-generator does.
+    "model": _SCHEMA_ANALYST_MODEL,
     "tools": [
         list_available_sources,
         get_tables_in_source,

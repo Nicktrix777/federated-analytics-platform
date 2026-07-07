@@ -52,6 +52,11 @@ export default function DashboardBuilderPage() {
   const [dashboardName, setDashboardName] = useState("");
   const [editingName, setEditingName] = useState(false);
   const [savingLayout, setSavingLayout] = useState(false);
+  const [showRefineModal, setShowRefineModal] = useState(false);
+  const [refineInstruction, setRefineInstruction] = useState("");
+  const [refining, setRefining] = useState(false);
+  const [refineError, setRefineError] = useState<string | null>(null);
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
 
   const loadDashboard = useCallback(async () => {
     if (!dashboardId) return;
@@ -169,6 +174,27 @@ export default function DashboardBuilderPage() {
     }
   };
 
+  const handleRefine = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dashboardId) return;
+    setRefining(true);
+    setRefineError(null);
+    try {
+      const result = await dashboardsApi.refine(dashboardId, refineInstruction);
+      setShowRefineModal(false);
+      setRefineInstruction("");
+      setAiSummary(result.explanation || "Dashboard updated.");
+      await loadDashboard();
+    } catch (err) {
+      const detail =
+        (err as { response?: { data?: { error?: string; details?: string } } })
+          .response?.data;
+      setRefineError(detail?.details || detail?.error || "Refinement failed. Please try again.");
+    } finally {
+      setRefining(false);
+    }
+  };
+
   const handleDeleteWidget = async (widgetId: number) => {
     if (!dashboardId || !confirm("Remove this widget?")) return;
     await dashboardsApi.deleteWidget(dashboardId, widgetId);
@@ -229,10 +255,20 @@ export default function DashboardBuilderPage() {
             <p className="db-builder-desc">{dashboard.description}</p>
           )}
         </div>
-        <button className="btn btn-primary" onClick={openAddWidget}>
+        <button className="btn btn-primary" onClick={() => { setRefineError(null); setShowRefineModal(true); }}>
+          ✨ Refine with AI
+        </button>
+        <button className="btn btn-ghost" onClick={openAddWidget}>
           + Add Widget
         </button>
       </div>
+
+      {aiSummary && (
+        <div className="ai-summary-banner">
+          <span>✨ {aiSummary}</span>
+          <button className="btn btn-ghost btn-sm" onClick={() => setAiSummary(null)}>✕</button>
+        </div>
+      )}
 
       {/* Canvas */}
       {widgets.length === 0 ? (
@@ -266,6 +302,48 @@ export default function DashboardBuilderPage() {
               </div>
             ))}
           </GridLayout>
+        </div>
+      )}
+
+      {/* AI Refine Modal */}
+      {showRefineModal && (
+        <div className="modal-overlay" onClick={() => !refining && setShowRefineModal(false)}>
+          <div className="modal-box modal-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>✨ Refine Dashboard with AI</h2>
+              <button className="modal-close" onClick={() => setShowRefineModal(false)} disabled={refining}>✕</button>
+            </div>
+            <form onSubmit={handleRefine} className="modal-form">
+              <div className="form-group">
+                <label>What should change? *</label>
+                <textarea
+                  className="form-input"
+                  placeholder={
+                    "e.g. Add a pie chart of employees by location, turn the salary chart " +
+                    "into a line trend, and remove the tasks table."
+                  }
+                  value={refineInstruction}
+                  onChange={(e) => setRefineInstruction(e.target.value)}
+                  rows={4}
+                  required
+                  autoFocus
+                  disabled={refining}
+                />
+              </div>
+              <p className="form-hint">
+                The AI edits this dashboard in place: widgets you don't mention stay as they are.
+              </p>
+              {refineError && <div className="form-error">{refineError}</div>}
+              <div className="modal-footer">
+                <button type="button" className="btn btn-ghost" onClick={() => setShowRefineModal(false)} disabled={refining}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={refining || !refineInstruction.trim()}>
+                  {refining ? "Applying changes… (up to a minute)" : "Apply Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

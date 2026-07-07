@@ -27,6 +27,60 @@ class Settings(BaseSettings):
     # Service port
     port: int = Field(default=8082)
 
+    # ── Fast path (Phase 3) ──────────────────────────────────
+    # Try a single cheap LLM call using the schema context Core API already
+    # sent before falling back to the full multi-agent pipeline.
+    fast_path_enabled: bool = Field(
+        default=True,
+        description="Try a single-shot LLM call for simple questions before the full deepagents pipeline",
+    )
+    fast_path_model: str = Field(
+        default="gpt-4o",
+        description=(
+            "OpenAI model used for the fast-path single-shot attempt. "
+            "Measured on this workload gpt-4o answers ~1s faster than gpt-4o-mini "
+            "(~2s vs ~3s); use gpt-4o-mini only to cut cost, not latency."
+        ),
+    )
+    fast_path_confidence_threshold: float = Field(
+        default=0.55,
+        description="Fast-path plans below this confidence escalate to the full pipeline",
+    )
+
+    # ── LLM resilience (Phase 1) ─────────────────────────────
+    llm_max_retries: int = Field(
+        default=5,
+        description="Max retries with exponential backoff on 429/5xx from the LLM provider",
+    )
+    llm_timeout_seconds: float = Field(
+        default=60.0,
+        description="Per-call timeout (seconds) for LLM requests",
+    )
+
+    # ── Concurrency control (Phase 1) ────────────────────────
+    # Caps how many /api/plan pipelines run at once so bursts of requests
+    # don't all hit OpenAI's rate limits simultaneously.
+    ai_max_concurrent_plans: int = Field(
+        default=4,
+        description="Max concurrent /api/plan pipelines (fast or full) running at once",
+    )
+    ai_queue_timeout_seconds: float = Field(
+        default=45.0,
+        description="Max time a request waits for a concurrency slot before failing fast with 503",
+    )
+
+    # ── Schema/metadata tool cache (Phase 1) ─────────────────
+    schema_tool_cache_ttl_seconds: float = Field(
+        default=60.0,
+        description="TTL for Trino/postgres-meta lookups used by agent tools (schema-analyst, etc.)",
+    )
+
+    # ── Model tiering (Phase 4) ───────────────────────────────
+    schema_analyst_model: str = Field(
+        default="openai:gpt-4o-mini",
+        description="deepagents model string for the schema-analyst subagent (cheap; mostly tool-calling, not reasoning-heavy)",
+    )
+
     model_config = {"env_file": ".env", "case_sensitive": False}
 
 
