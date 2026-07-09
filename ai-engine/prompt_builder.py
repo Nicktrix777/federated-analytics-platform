@@ -20,11 +20,6 @@ def build_system_prompt(datasets: List[DatasetMeta]) -> str:
 
     schema_sections = []
     for ds in datasets:
-        parts = ds.trino_path.split(".")
-        catalog = parts[0] if len(parts) > 0 else "unknown"
-        schema = parts[1] if len(parts) > 1 else "public"
-        table = parts[2] if len(parts) > 2 else ds.name
-
         col_lines = []
         for col in ds.columns:
             line = f"  - {col.column_name} ({col.data_type})"
@@ -43,7 +38,7 @@ def build_system_prompt(datasets: List[DatasetMeta]) -> str:
         schema_sections.append(f"""### {ds.name}
 Description: {ds.description}
 Source type: {ds.source_type}
-Trino reference: {catalog}.{schema}.{table}
+Trino reference: {ds.trino_path}
 Columns:
 {cols_str}""")
 
@@ -77,9 +72,15 @@ e.employee_id = CAST(ep.employee_id AS INTEGER)
 
 ## Trino SQL Rules
 
-1. Always use fully qualified table names: catalog.schema.table
+1. Always use fully qualified table names: catalog.schema.table — copy the
+   exact "Trino reference" value shown for each dataset above VERBATIM,
+   including any double quotes. Never strip quotes or drop the catalog/schema
+   prefix, even if the table segment looks unusual.
    - PostgreSQL tables: postgres_source.public.table_name
    - MongoDB collections: mongodb.employee_db.collection_name  (schema is "employee_db", NOT "default")
+   - Elasticsearch indices often contain hyphens/dots (e.g. "contracts-v2.40")
+     and MUST stay double-quoted or Trino misreads the hyphen as subtraction:
+     elasticsearch.default."contracts-v2.40"
 
 2. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.)
 
@@ -302,7 +303,9 @@ def build_user_prompt(request: PlanRequest) -> str:
 Question: {request.question}
 
 Remember:
-- Use fully qualified table names (catalog.schema.table)
+- Use fully qualified table names (catalog.schema.table), copied verbatim
+  from the "Trino reference" shown for each dataset — including any double
+  quotes around a hyphenated/dotted segment (e.g. Elasticsearch indices)
 - MongoDB schema is "employee_db", never "default"
 - Only generate SELECT queries
 - For "Nth highest per group" use DENSE_RANK() in a CTE

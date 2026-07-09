@@ -72,6 +72,14 @@ _dashboard_agent = None
 # handshake each time, which alone added several hundred ms per plan.
 _fast_provider: Optional[OpenAIProvider] = None
 
+# Separate provider (frontier model) for widget SQL work — the batched
+# per-dashboard widget-SQL call and widget-SQL repair. This is the one step
+# that does real reasoning (matching a Trino CROSS JOIN UNNEST alias list to
+# a nested row type); gpt-4o-mini measurably produced invalid SQL on deeply
+# nested Elasticsearch array fields, so it stays on gpt-4o even though
+# fast-path/schema-analyst use the cheaper model.
+_widget_sql_provider: Optional[OpenAIProvider] = None
+
 # Caps how many /api/plan pipelines (fast or full) run at once so bursts of
 # concurrent requests don't all hit OpenAI's rate limits simultaneously.
 _plan_semaphore = asyncio.Semaphore(settings.ai_max_concurrent_plans)
@@ -79,7 +87,7 @@ _plan_semaphore = asyncio.Semaphore(settings.ai_max_concurrent_plans)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _agent, _dashboard_agent, _fast_provider
+    global _agent, _dashboard_agent, _fast_provider, _widget_sql_provider
     try:
         # Set API keys as environment variables for langchain providers
         if settings.openai_api_key:
@@ -87,6 +95,12 @@ async def lifespan(app: FastAPI):
             _fast_provider = OpenAIProvider(
                 api_key=settings.openai_api_key,
                 model=settings.fast_path_model,
+                max_retries=settings.llm_max_retries,
+                timeout=settings.llm_timeout_seconds,
+            )
+            _widget_sql_provider = OpenAIProvider(
+                api_key=settings.openai_api_key,
+                model=settings.dashboard_widget_sql_model,
                 max_retries=settings.llm_max_retries,
                 timeout=settings.llm_timeout_seconds,
             )
@@ -272,7 +286,7 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
 
     The Core API validates every widget's SQL AGAIN before persisting.
     """
-    if _dashboard_agent is None:
+    if _dashboard_agent is None or _widget_sql_provider is None:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -298,6 +312,7 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
             plan = await generate_dashboard_plan(
                 _dashboard_agent,
                 request.prompt,
+                _widget_sql_provider,
                 extra_context=extra_context,
                 current_dashboard=request.current_dashboard,
             )
@@ -373,7 +388,7 @@ async def repair_widget(request: RepairWidgetRequest) -> RepairWidgetResponse:
     Architecture boundary unchanged: this NEVER executes SQL. The Core API
     re-verifies the returned SQL against Trino before persisting it.
     """
-    if _fast_provider is None:
+    if _widget_sql_provider is None:
         raise HTTPException(
             status_code=503,
             detail="SQL repair unavailable — no OpenAI provider configured (set OPENAI_API_KEY)",
@@ -389,7 +404,7 @@ async def repair_widget(request: RepairWidgetRequest) -> RepairWidgetResponse:
     )
 
     try:
-        fixed_sql = await _fast_provider.repair_sql(REPAIR_SYSTEM_PROMPT, user_prompt)
+        fixed_sql = await _widget_sql_provider.repair_sql(REPAIR_SYSTEM_PROMPT, user_prompt)
     except Exception as e:
         logger.error(f"Widget SQL repair failed: {e}", exc_info=True)
         raise HTTPException(status_code=502, detail=f"SQL repair failed: {e}")

@@ -3,7 +3,12 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # LLM provider — always gpt-4o via deepagents model string
+    # Model for the two top-level deep agents only (query planner orchestrator,
+    # dashboard designer). Every other LLM call in this service (fast path,
+    # schema-analyst, sql-generator, widget repair, batched widget SQL) uses
+    # the cheaper *_model settings below — a single dashboard brief can fan
+    # out into a dozen+ calls, and running all of them on the frontier model
+    # is what was blowing through OpenAI's per-minute rate limit.
     llm_model: str = Field(
         default="openai:gpt-4o",
         description="deepagents model string e.g. 'openai:gpt-4o' or 'anthropic:claude-sonnet-4-6'"
@@ -35,11 +40,12 @@ class Settings(BaseSettings):
         description="Try a single-shot LLM call for simple questions before the full deepagents pipeline",
     )
     fast_path_model: str = Field(
-        default="gpt-4o",
+        default="gpt-4o-mini",
         description=(
-            "OpenAI model used for the fast-path single-shot attempt. "
-            "Measured on this workload gpt-4o answers ~1s faster than gpt-4o-mini "
-            "(~2s vs ~3s); use gpt-4o-mini only to cut cost, not latency."
+            "OpenAI model used for the fast-path single-shot attempt and for "
+            "widget SQL repair. gpt-4o answers ~1s faster on this workload "
+            "(~2s vs ~3s), but gpt-4o-mini has a much higher rate-limit tier "
+            "for the same account — worth the latency to avoid 429s."
         ),
     )
     fast_path_confidence_threshold: float = Field(
@@ -79,6 +85,25 @@ class Settings(BaseSettings):
     schema_analyst_model: str = Field(
         default="openai:gpt-4o-mini",
         description="deepagents model string for the schema-analyst subagent (cheap; mostly tool-calling, not reasoning-heavy)",
+    )
+    sql_generator_model: str = Field(
+        default="openai:gpt-4o",
+        description=(
+            "deepagents model string for the sql-generator subagent (query "
+            "planner's /api/plan full path). Kept on the frontier model — "
+            "unlike schema-analyst, this step does real reasoning (e.g. "
+            "matching a Trino CROSS JOIN UNNEST alias list to a nested "
+            "Elasticsearch row type), and gpt-4o-mini measurably produced "
+            "invalid SQL on deeply-nested array fields."
+        ),
+    )
+    dashboard_widget_sql_model: str = Field(
+        default="gpt-4o",
+        description=(
+            "Plain OpenAI model id (not a deepagents string) for the batched "
+            "per-dashboard widget-SQL call and widget-SQL repair — same "
+            "reasoning-quality tradeoff as sql_generator_model above."
+        ),
     )
 
     model_config = {"env_file": ".env", "case_sensitive": False}

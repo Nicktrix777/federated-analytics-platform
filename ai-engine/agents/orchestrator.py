@@ -130,12 +130,19 @@ async def generate_query_plan(
         # Normalize content: the OpenAI Responses API (used by deepagents) returns
         # content as a list of content blocks [{"type": "text", "text": "..."}]
         # rather than a plain string. Flatten to a single string before parsing.
-        content = _normalize_content(await run_agent(agent, user_message))
+        raw_content, files, _structured = await run_agent(agent, user_message)
+        content = _normalize_content(raw_content)
 
         logger.debug(f"Agent output (last 500 chars): {content[-500:]}")
 
-        # Extract the JSON plan from the output
-        plan_data = _extract_json_plan(content)
+        # Extract the JSON plan from the output, falling back to anything the
+        # agent wrote to its virtual filesystem instead of the chat reply.
+        try:
+            plan_data = _extract_json_plan(content)
+        except ValueError:
+            plan_data = _extract_json_from_files(files, "sql")
+            if plan_data is None:
+                raise
         return _build_query_plan(plan_data, question)
 
     except Exception as e:
@@ -144,11 +151,21 @@ async def generate_query_plan(
 
 
 async def run_agent(agent, user_message: str):
-    """Invoke a deepagent and return the raw content of its final message.
+    """Invoke a deepagent and return (final message content, virtual files, structured_response).
 
     deepagents/LangGraph agent.invoke() is synchronous — run it in a thread
     pool so it doesn't block the uvicorn event loop (which would make the
     /health endpoint unresponsive during long LLM pipelines).
+
+    structured_response is populated only for agents built with a
+    response_format= schema (see create_dashboard_designer) — the framework
+    forces a dedicated structured-output step for it, which is far more
+    reliable than trusting the model to end its chat reply with clean JSON.
+    For agents without response_format this is None; callers fall back to
+    parsing `content` (and, failing that, `files` — deepagents gives every
+    agent built-in filesystem tools and will sometimes write a large
+    structured output there instead of inlining it in the chat reply, or
+    auto-evict a large tool result to a file).
     """
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
@@ -164,11 +181,33 @@ async def run_agent(agent, user_message: str):
         raise ValueError("Agent returned no messages")
 
     last_message = messages[-1]
-    return (
+    content = (
         last_message.content
         if hasattr(last_message, "content")
         else str(last_message)
     )
+    return content, (result.get("files") or {}), result.get("structured_response")
+
+
+def _extract_json_from_files(files: dict, required_key: str) -> Optional[dict]:
+    """Scan deepagents virtual-filesystem writes for a JSON object containing required_key.
+
+    Fallback for when the model wrote its structured output to a file (via the
+    write_file tool, or the framework's own large-tool-result eviction) instead
+    of inlining it in the final chat message.
+    """
+    for path, file_data in files.items():
+        raw = file_data.get("content") if isinstance(file_data, dict) else getattr(file_data, "content", None)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and required_key in data:
+            logger.info(f"Recovered JSON plan from agent-written file: {path}")
+            return data
+    return None
 
 
 def _normalize_content(content) -> str:

@@ -10,7 +10,20 @@ Specializes in:
 This subagent receives schema context from the schema-analyst and produces SQL.
 """
 
+from config import settings
+from langchain.chat_models import init_chat_model
+
 from agents.tools.metadata_tools import get_query_history_patterns
+
+# Resolved explicitly so this subagent runs on the cheap model even when
+# invoked from a gpt-4o main agent (orchestrator) — without this it inherits
+# the parent's model, which is one of the biggest contributors to the
+# OpenAI rate-limit bursts on multi-widget dashboard requests.
+_SQL_GENERATOR_MODEL = init_chat_model(
+    settings.sql_generator_model,
+    max_retries=settings.llm_max_retries,
+    timeout=settings.llm_timeout_seconds,
+)
 
 SQL_GENERATOR_SYSTEM_PROMPT = """You are a Trino SQL Expert for a Federated Analytics Platform.
 
@@ -143,5 +156,6 @@ SQL_GENERATOR_SUBAGENT = {
         "and columns. Provide the schema context from the analyst as input."
     ),
     "system_prompt": SQL_GENERATOR_SYSTEM_PROMPT,
+    "model": _SQL_GENERATOR_MODEL,
     "tools": [get_query_history_patterns],
 }

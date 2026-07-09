@@ -12,7 +12,7 @@ import logging
 from langchain_core.tools import tool
 
 from agents.tools._cache import async_ttl_cache
-from agents.tools._common import meta_connection, run_sync
+from agents.tools._common import build_trino_path, meta_connection, run_sync
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ async def _async_get_datasets() -> str:
         async with meta_connection() as conn:
             dataset_rows = await conn.fetch("""
                 SELECT id, name, description, source_type,
-                       trino_catalog || '.' || trino_schema || '.' || trino_table AS trino_path
+                       trino_catalog, trino_schema, trino_table
                 FROM datasets
                 WHERE is_active = true
                 ORDER BY name
@@ -55,7 +55,9 @@ async def _async_get_datasets() -> str:
                     "name": row["name"],
                     "description": row["description"] or "",
                     "source_type": row["source_type"],
-                    "trino_path": row["trino_path"],
+                    "trino_path": build_trino_path(
+                        row["trino_catalog"], row["trino_schema"], row["trino_table"]
+                    ),
                     "columns": [
                         {
                             "column_name": c["column_name"],

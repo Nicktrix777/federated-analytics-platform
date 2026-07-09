@@ -24,7 +24,7 @@ func NewMetadataService(db *sql.DB) *MetadataService {
 func (s *MetadataService) GetAllDatasets() ([]models.DatasetMeta, error) {
 	rows, err := s.db.Query(`
 		SELECT id, name, description, source_type,
-		       trino_catalog || '.' || trino_schema || '.' || trino_table AS trino_path
+		       trino_catalog, trino_schema, trino_table
 		FROM datasets
 		WHERE is_active = true
 		ORDER BY name
@@ -37,9 +37,13 @@ func (s *MetadataService) GetAllDatasets() ([]models.DatasetMeta, error) {
 	var datasets []models.DatasetMeta
 	for rows.Next() {
 		var d models.DatasetMeta
-		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.SourceType, &d.TrinoPath); err != nil {
+		var catalog, schemaName, table string
+		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.SourceType, &catalog, &schemaName, &table); err != nil {
 			return nil, fmt.Errorf("failed to scan dataset: %w", err)
 		}
+		// Quote each segment that needs it (e.g. Elasticsearch index names
+		// like "contracts-v2.37") so the path is directly runnable in Trino.
+		d.TrinoPath = buildTrinoPath(catalog, schemaName, table)
 		datasets = append(datasets, d)
 	}
 

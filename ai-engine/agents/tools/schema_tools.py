@@ -16,7 +16,13 @@ import logging
 from langchain_core.tools import tool
 
 from agents.tools._cache import async_ttl_cache
-from agents.tools._common import meta_connection, run_sync, run_trino_query
+from agents.tools._common import (
+    build_trino_path,
+    meta_connection,
+    run_sync,
+    run_trino_query,
+    split_trino_path,
+)
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -87,7 +93,14 @@ async def _async_get_tables(catalog: str) -> str:
     """
     try:
         rows = await run_trino_query(query, source="fap-ai-schema-tool")
-        tables = [{"schema": str(r[0]), "table": str(r[1]), "trino_path": f"{catalog}.{r[0]}.{r[1]}"} for r in rows]
+        tables = [
+            {
+                "schema": str(r[0]),
+                "table": str(r[1]),
+                "trino_path": build_trino_path(catalog, str(r[0]), str(r[1])),
+            }
+            for r in rows
+        ]
         return json.dumps(tables, indent=2)
     except Exception as e:
         logger.warning(f"Could not list tables in {catalog}: {e}")
@@ -109,11 +122,10 @@ def get_column_details(trino_path: str) -> str:
 @async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
 async def _async_get_columns(trino_path: str) -> str:
     """Get columns from Trino's information_schema and enrich with postgres-meta descriptions."""
-    parts = trino_path.split(".")
-    if len(parts) != 3:
-        return json.dumps({"error": f"Invalid trino_path: {trino_path}. Expected catalog.schema.table"})
-
-    catalog, schema, table = parts
+    try:
+        catalog, schema, table = split_trino_path(trino_path)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
 
     # Fetch live schema from Trino
     query = f"""
@@ -189,9 +201,11 @@ async def _async_schema_summary(catalog: str) -> str:
     tables: dict[str, dict] = {}
     for row in rows:
         schema, table, col, dtype = str(row[0]), str(row[1]), str(row[2]), str(row[3])
-        key = f"{catalog}.{schema}.{table}"
+        # Group by the raw schema.table (stable dict key); expose the quoted,
+        # directly-runnable path as the "trino_path" value.
+        key = f"{schema}.{table}"
         if key not in tables:
-            tables[key] = {"trino_path": key, "columns": []}
+            tables[key] = {"trino_path": build_trino_path(catalog, schema, table), "columns": []}
         tables[key]["columns"].append({"name": col, "type": dtype.upper()})
 
     return json.dumps(list(tables.values()), indent=2)

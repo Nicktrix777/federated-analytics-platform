@@ -10,11 +10,49 @@ runner. These used to be copy-pasted into every tool — they live here once.
 import asyncio
 import concurrent.futures
 import contextlib
+import re
 
 import asyncpg
 import httpx
 
 from config import settings
+
+_SIMPLE_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def quote_trino_ident(ident: str) -> str:
+    """Double-quote an identifier segment if it needs it.
+
+    Trino identifiers containing anything other than letters, digits, or
+    underscores (hyphens, dots, spaces — common in Elasticsearch index names
+    like "contracts-v2.37") must be quoted or the parser misreads them (e.g.
+    a bare hyphen parses as subtraction).
+    """
+    if _SIMPLE_IDENT_RE.match(ident):
+        return ident
+    return '"' + ident.replace('"', '""') + '"'
+
+
+def build_trino_path(catalog: str, schema: str, table: str) -> str:
+    """Join catalog/schema/table into a directly Trino-executable path."""
+    return f"{quote_trino_ident(catalog)}.{quote_trino_ident(schema)}.{quote_trino_ident(table)}"
+
+
+def split_trino_path(trino_path: str) -> tuple:
+    """Split a catalog.schema.table path into 3 parts.
+
+    Tolerates a table segment that itself contains dots (e.g. an ES index
+    named "contracts-v2.37") by only splitting on the first two dots, and
+    strips surrounding double-quotes from the table segment if present.
+    """
+    parts = trino_path.split(".", 2)
+    if len(parts) != 3:
+        raise ValueError(f"Invalid trino_path: {trino_path!r}. Expected catalog.schema.table")
+    catalog, schema, table = parts
+    table = table.strip()
+    if table.startswith('"') and table.endswith('"'):
+        table = table[1:-1].replace('""', '"')
+    return catalog, schema, table
 
 
 def run_sync(coro):

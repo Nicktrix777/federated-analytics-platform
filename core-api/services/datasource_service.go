@@ -469,10 +469,13 @@ func (s *DataSourceService) fetchSchemaFromTrino(catalog string) (map[string]int
 		col := fmt.Sprintf("%v", row[2])
 		dtype := fmt.Sprintf("%v", row[3])
 
+		// Map key stays raw/unquoted catalog.schema.table — syncDatasetsForCatalog
+		// below splits it back into 3 parts. The "trino_path" value is the
+		// quoted, directly-runnable form exposed to callers.
 		key := fmt.Sprintf("%s.%s.%s", catalog, schema, table)
 		if _, ok := tables[key]; !ok {
 			tables[key] = map[string]interface{}{
-				"trino_path": key,
+				"trino_path": buildTrinoPath(catalog, schema, table),
 				"columns":    []map[string]string{},
 			}
 		}
