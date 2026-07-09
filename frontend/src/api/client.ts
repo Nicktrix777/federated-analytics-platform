@@ -6,6 +6,7 @@ import type {
   DataSource,
   CreateDataSourcePayload,
   SchemaRefreshResult,
+  SyncCatalogsResult,
   Dashboard,
   DashboardWidget,
   CreateDashboardPayload,
@@ -114,6 +115,13 @@ export const dataSourcesApi = {
     errors: string[];
   }> => {
     const response = await client.post("/api/datasources/refresh-all");
+    return response.data;
+  },
+
+  syncCatalogs: async (): Promise<SyncCatalogsResult> => {
+    const response = await client.post<SyncCatalogsResult>(
+      "/api/datasources/sync"
+    );
     return response.data;
   },
 };

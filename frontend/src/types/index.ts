@@ -38,6 +38,12 @@ export interface SchemaRefreshResult {
   message: string;
 }
 
+export interface SyncCatalogsResult {
+  new_sources: string[];
+  new_datasets: string[];
+  message: string;
+}
+
 // ── Datasets ─────────────────────────────────────────────────
 
 export interface DatasetColumn {
@@ -150,11 +156,19 @@ export interface CreateDashboardPayload {
   layout?: string;
 }
 
+// A widget the AI proposed but could not add — its SQL never ran successfully
+// against the data source, even after repair attempts.
+export interface DroppedWidget {
+  title: string;
+  reason: string;
+}
+
 // Response from the AI generate/refine endpoints
 export interface AIDashboardResponse {
   dashboard: Dashboard;
   explanation: string;
   confidence: number;
+  dropped_widgets: DroppedWidget[] | null;
 }
 
 export interface CreateWidgetPayload {

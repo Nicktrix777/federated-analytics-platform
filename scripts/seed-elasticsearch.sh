@@ -2,12 +2,14 @@
 # ============================================================
 # Federated Analytics Platform — Elasticsearch Index Seeder
 #
-# Creates the contracts-v2.37 and contracts-v2.40 indices using
-# the explicit mappings checked into scripts/schemas/, then loads
-# 500 synthetic sample documents into each.
+# Creates a single contracts index using one of the explicit mappings
+# checked into scripts/schemas/, then loads synthetic sample documents
+# into it. Only one contract index is kept at a time — re-running with
+# a different CONTRACT_INDEX deletes the old one.
 #
 # Usage:
 #   ./scripts/seed-elasticsearch.sh
+#   CONTRACT_INDEX=contracts-v2.37 SAMPLE_COUNT=1000 ./scripts/seed-elasticsearch.sh
 #
 # Requirements:
 #   - Elasticsearch running at localhost:9200
@@ -26,7 +28,7 @@ SCHEMA_DIR="${SCRIPT_DIR}/schemas"
 GENERATOR="${SCRIPT_DIR}/generate-contract-sample-data.js"
 SAMPLE_COUNT="${SAMPLE_COUNT:-500}"
 
-INDICES=("contracts-v2.37" "contracts-v2.40")
+INDICES=("${CONTRACT_INDEX:-contracts-v2.40}")
 
 if ! command -v node > /dev/null 2>&1; then
   echo "❌ node is required to generate sample data but was not found on PATH"
@@ -49,6 +51,14 @@ until curl -sf "${ES_BASE}/_cluster/health?wait_for_status=yellow&timeout=5s" > 
 done
 
 echo "✅ Elasticsearch is ready"
+
+# ── Enforce a single contract index — drop any other contracts-v2.* ──
+for OTHER in $(curl -sf "${ES_BASE}/_cat/indices/contracts-v2.*?h=index" 2>/dev/null || true); do
+  if [ "${OTHER}" != "${INDICES[0]}" ]; then
+    echo "🗑️  Removing stale contract index ${OTHER}"
+    curl -sf -X DELETE "${ES_BASE}/${OTHER}" > /dev/null 2>&1 || true
+  fi
+done
 
 for INDEX in "${INDICES[@]}"; do
   MAPPING_FILE="${SCHEMA_DIR}/${INDEX}.json"
@@ -83,5 +93,4 @@ echo ""
 echo "🎉 Elasticsearch index creation complete!"
 echo ""
 echo "Sample Trino query to verify:"
-echo "  SELECT * FROM elasticsearch.default.\"contracts-v2.37\" LIMIT 5"
-echo "  SELECT * FROM elasticsearch.default.\"contracts-v2.40\" LIMIT 5"
+echo "  SELECT * FROM elasticsearch.default.\"${INDICES[0]}\" LIMIT 5"

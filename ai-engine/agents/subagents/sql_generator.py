@@ -27,6 +27,17 @@ Always use the three-part path: catalog.schema.table
 - MongoDB: mongodb.employee_db.collection_name  (NOT "default" for MongoDB)
 - Elasticsearch: elasticsearch.default.index_name
 
+### Quoting Identifiers With Special Characters (MANDATORY)
+Trino identifiers containing anything other than letters, digits, or
+underscores — hyphens, dots, spaces — MUST be double-quoted, or the parser
+misreads them (e.g. a bare hyphen is parsed as subtraction). This is common
+for Elasticsearch index names such as "contracts-v2.37". Quote only the
+segment that needs it — never invent a "sanitized" name by replacing the
+special characters with underscores, that table won't exist:
+- WRONG:   elasticsearch.default.contracts-v2.37
+- WRONG:   elasticsearch.default.contracts_v2_37
+- RIGHT:   elasticsearch.default."contracts-v2.37"
+
 ### Exact Column Names (MANDATORY)
 Use ONLY column names that appear verbatim in the provided schema context.
 NEVER invent plausible-sounding names — e.g. departments has "name" (not
@@ -50,8 +61,56 @@ explanation and lower your confidence instead of guessing.
 - Pattern: WITH ranked AS (SELECT ..., DENSE_RANK() OVER (...) AS rank) SELECT ... WHERE rank <= N
 
 ### Array/Nested Fields
-- MongoDB/ES arrays: Use contains(array_col, 'value')  NOT ARRAY_CONTAINS
-- Elasticsearch nested fields: Use dot notation 'parent.child'
+- MongoDB/ES arrays of scalars: Use contains(array_col, 'value')  NOT ARRAY_CONTAINS
+- Elasticsearch nested scalar fields (no array involved): dot notation 'parent.child'
+
+### Unnesting Elasticsearch Arrays of Objects (MANDATORY)
+When the schema context shows a column's type as `array(row(field1 type1, field2
+type2, ...))`, that column holds an array of objects (e.g. an ES "nested" field
+like multiple drivers on one contract, multiple attachments on one customer).
+To read into it you MUST `CROSS JOIN UNNEST(column)` — but Trino requires you
+to list ONE alias per field of the row, in the exact order the schema shows
+them, not a single alias for the whole object. Supplying fewer aliases fails
+with "Column alias list has N entries but 't' has M columns available".
+
+The safe pattern: copy the field names straight from the schema context's type
+string, in order, and reuse them verbatim as your aliases — then you can
+immediately reference the one(s) you need by their original name. If one of
+those fields is itself `array(row(...))`, unnest it again the same way in a
+second CROSS JOIN.
+
+Example — schema shows elasticsearch.default."contracts-v2.40" has:
+  details: array(row(attachments ..., constraints ..., drivers array(row(
+    "@timestamp" ..., accounts ..., agency ..., attachments ..., birthDate ...,
+    contact ..., countryOfResidence ..., customerType ..., did ...,
+    driverLicense ..., emiratesId ..., gccId ..., gender ..., id ...,
+    imageUrl ..., internationalDrivingPermit ..., isCustomer ..., isDriver ...,
+    name ..., nationality varchar, passport ..., preferences ..., source ...,
+    sourceKey ..., type ..., userId ..., versionHash ..., visa ...
+  )), electronicSignature ..., expectedReturnDate ..., isCurrent ..., items ...,
+  owner ..., payables ..., payments ..., pickup ..., readings ...,
+  rentalCounter ..., startDate ..., unifiedPayables ..., vehicle ...,
+  vehicleCondition ...))
+
+To count drivers grouped by nationality:
+```sql
+SELECT dt.nationality AS nationality, COUNT(*) AS driver_count
+FROM elasticsearch.default."contracts-v2.40"
+CROSS JOIN UNNEST(details) AS dd(attachments, constraints, drivers,
+  electronicSignature, expectedReturnDate, isCurrent, items, owner, payables,
+  payments, pickup, readings, rentalCounter, startDate, unifiedPayables,
+  vehicle, vehicleCondition)
+CROSS JOIN UNNEST(drivers) AS dt("@timestamp", accounts, agency, attachments,
+  birthDate, contact, countryOfResidence, customerType, did, driverLicense,
+  emiratesId, gccId, gender, id, imageUrl, internationalDrivingPermit,
+  isCustomer, isDriver, name, nationality, passport, preferences, source,
+  sourceKey, type, userId, versionHash, visa)
+GROUP BY dt.nationality
+ORDER BY driver_count DESC
+```
+Never drop fields from the middle of the alias list to save typing, and never
+rename a field other than the one(s) you are actually selecting/grouping on —
+either breaks the positional match to the schema's row layout.
 
 ### Aggregations
 - Always include LIMIT for non-aggregated queries

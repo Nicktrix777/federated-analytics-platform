@@ -49,6 +49,8 @@ export default function DataSourcesPage() {
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedSchemaId, setExpandedSchemaId] = useState<number | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const loadSources = useCallback(async () => {
     try {
@@ -114,6 +116,29 @@ export default function DataSourcesPage() {
     }
   };
 
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMessage(null);
+    setError(null);
+    try {
+      const result = await dataSourcesApi.syncCatalogs();
+      await loadSources();
+      const parts: string[] = [];
+      if (result.new_sources.length > 0) {
+        parts.push(`${result.new_sources.length} new source(s): ${result.new_sources.join(", ")}`);
+      }
+      if (result.new_datasets.length > 0) {
+        parts.push(`${result.new_datasets.length} new dataset(s): ${result.new_datasets.join(", ")}`);
+      }
+      setSyncMessage(parts.length > 0 ? parts.join(" — ") : "No new catalogs or tables found");
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { details?: string } }; message?: string };
+      setError(err.response?.data?.details || err.message || "Catalog sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleDelete = async (id: number, name: string) => {
     if (!confirm(`Remove "${name}" from registered sources?`)) return;
     try {
@@ -143,15 +168,36 @@ export default function DataSourcesPage() {
             automatically fetched and made available to the AI query planner.
           </p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-          <span>+</span> Connect Source
-        </button>
+        <div className="ds-header-actions">
+          <button
+            className="btn btn-secondary"
+            onClick={handleSync}
+            disabled={syncing}
+            title="Discover new Trino catalogs and tables/indices (e.g. a newly added Elasticsearch index) without a manual setup step"
+          >
+            {syncing ? (
+              <><span className="spinner-sm" /> Syncing...</>
+            ) : (
+              <>⟲ Sync Catalogs</>
+            )}
+          </button>
+          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+            <span>+</span> Connect Source
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="ds-error">
           <span>⚠️ {error}</span>
           <button onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
+
+      {syncMessage && (
+        <div className="ds-success">
+          <span>✓ {syncMessage}</span>
+          <button onClick={() => setSyncMessage(null)}>✕</button>
         </div>
       )}
 

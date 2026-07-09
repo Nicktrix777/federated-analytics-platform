@@ -57,6 +57,7 @@ export default function DashboardBuilderPage() {
   const [refining, setRefining] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiHadDroppedWidgets, setAiHadDroppedWidgets] = useState(false);
 
   const loadDashboard = useCallback(async () => {
     if (!dashboardId) return;
@@ -184,6 +185,7 @@ export default function DashboardBuilderPage() {
       setShowRefineModal(false);
       setRefineInstruction("");
       setAiSummary(result.explanation || "Dashboard updated.");
+      setAiHadDroppedWidgets(Boolean(result.dropped_widgets?.length));
       await loadDashboard();
     } catch (err) {
       const detail =
@@ -264,8 +266,8 @@ export default function DashboardBuilderPage() {
       </div>
 
       {aiSummary && (
-        <div className="ai-summary-banner">
-          <span>✨ {aiSummary}</span>
+        <div className={`ai-summary-banner${aiHadDroppedWidgets ? " ai-summary-banner-warning" : ""}`}>
+          <span>{aiHadDroppedWidgets ? "⚠️" : "✨"} {aiSummary}</span>
           <button className="btn btn-ghost btn-sm" onClick={() => setAiSummary(null)}>✕</button>
         </div>
       )}

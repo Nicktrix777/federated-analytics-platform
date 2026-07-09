@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -177,9 +179,10 @@ func (h *DashboardHandler) HandleGenerate(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
-		"dashboard":   final,
-		"explanation": plan.Explanation,
-		"confidence":  plan.Confidence,
+		"dashboard":       final,
+		"explanation":     plan.Explanation,
+		"confidence":      plan.Confidence,
+		"dropped_widgets": plan.DroppedWidgets,
 	})
 }
 
@@ -235,9 +238,10 @@ func (h *DashboardHandler) HandleRefine(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"dashboard":   final,
-		"explanation": plan.Explanation,
-		"confidence":  plan.Confidence,
+		"dashboard":       final,
+		"explanation":     plan.Explanation,
+		"confidence":      plan.Confidence,
+		"dropped_widgets": plan.DroppedWidgets,
 	})
 }
 
@@ -288,10 +292,17 @@ func (h *DashboardHandler) planDashboard(
 	for _, w := range plan.Widgets {
 		if err := validateRawSQL(w.SQL); err != nil {
 			log.Printf("dashboard: dropping widget %q — failed safety check: %v", w.Title, err)
+			plan.DroppedWidgets = append(plan.DroppedWidgets, models.DroppedWidget{
+				Title: w.Title, Reason: "The generated query failed a safety check: " + err.Error(),
+			})
 			continue
 		}
-		fixedSQL, ok := h.verifyAndRepairWidget(w, datasets)
-		if !ok {
+		fixedSQL, err := h.verifyAndRepairWidget(w, datasets)
+		if err != nil {
+			log.Printf("dashboard: dropping widget %q — SQL could not be executed after repair: %v", w.Title, err)
+			plan.DroppedWidgets = append(plan.DroppedWidgets, models.DroppedWidget{
+				Title: w.Title, Reason: "The query didn't run successfully against the data source: " + err.Error(),
+			})
 			continue
 		}
 		w.SQL = fixedSQL
@@ -304,23 +315,34 @@ func (h *DashboardHandler) planDashboard(
 		})
 		return nil, false
 	}
+	if len(plan.DroppedWidgets) > 0 {
+		titles := make([]string, len(plan.DroppedWidgets))
+		for i, d := range plan.DroppedWidgets {
+			titles[i] = fmt.Sprintf("%q", d.Title)
+		}
+		plan.Explanation = strings.TrimSpace(fmt.Sprintf(
+			"%s I wasn't able to add %s — the query kept failing against the data source even after retrying. See the details below.",
+			plan.Explanation, strings.Join(titles, ", "),
+		))
+	}
 	return plan, true
 }
 
 // verifyAndRepairWidget runs a widget's SQL against the Query Service exactly
 // as the dashboard UI will. If it executes, the (possibly unchanged) SQL is
-// returned with ok=true. If it fails, the SQL and the engine error are sent to
-// the AI Engine for a focused repair (up to maxWidgetRepairAttempts), each
-// attempt re-verified against Trino. Returns ok=false only when no runnable SQL
-// could be produced — the caller then drops the widget.
+// returned with a nil error. If it fails, the SQL and the engine error are
+// sent to the AI Engine for a focused repair (up to maxWidgetRepairAttempts),
+// each attempt re-verified against Trino. Returns a non-nil error only when no
+// runnable SQL could be produced — the caller then drops the widget and
+// surfaces this error as the reason.
 func (h *DashboardHandler) verifyAndRepairWidget(
 	w models.WidgetPlan,
 	datasets []models.DatasetMeta,
-) (string, bool) {
+) (string, error) {
 	sql := w.SQL
 	execErr := h.verifyWidgetSQL(sql)
 	if execErr == nil {
-		return sql, true
+		return sql, nil
 	}
 
 	for attempt := 1; attempt <= maxWidgetRepairAttempts; attempt++ {
@@ -335,6 +357,7 @@ func (h *DashboardHandler) verifyAndRepairWidget(
 		// A repaired query must still clear the static safety gate before we run it.
 		if err := validateRawSQL(repaired); err != nil {
 			log.Printf("dashboard: repaired SQL for widget %q failed safety check: %v", w.Title, err)
+			execErr = err
 			break
 		}
 
@@ -342,13 +365,11 @@ func (h *DashboardHandler) verifyAndRepairWidget(
 		execErr = h.verifyWidgetSQL(sql)
 		if execErr == nil {
 			log.Printf("dashboard: widget %q repaired successfully on attempt %d", w.Title, attempt)
-			return sql, true
+			return sql, nil
 		}
 	}
 
-	log.Printf("dashboard: dropping widget %q — SQL could not be executed after repair: %v",
-		w.Title, execErr)
-	return "", false
+	return "", execErr
 }
 
 // verifyWidgetSQL executes a widget's SQL against the Query Service, returning

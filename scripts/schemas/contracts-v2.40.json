@@ -45,6 +45,114 @@
     }
   },
   "mappings": {
+    "_meta": {
+      "trino": {
+        "attachments": {
+          "isArray": true
+        },
+        "business": {
+          "attachments": {
+            "isArray": true
+          }
+        },
+        "charges": {
+          "isArray": true,
+          "chargeDetails": {
+            "fines": {
+              "isArray": true
+            },
+            "parkings": {
+              "isArray": true
+            },
+            "tolls": {
+              "isArray": true
+            }
+          }
+        },
+        "customer": {
+          "attachments": {
+            "isArray": true
+          },
+          "contact": {
+            "addresses": {
+              "isArray": true
+            },
+            "emails": {
+              "isArray": true
+            },
+            "phones": {
+              "isArray": true
+            }
+          }
+        },
+        "details": {
+          "isArray": true,
+          "constraints": {
+            "isArray": true
+          },
+          "drivers": {
+            "isArray": true,
+            "attachments": {
+              "isArray": true
+            },
+            "contact": {
+              "addresses": {
+                "isArray": true
+              },
+              "emails": {
+                "isArray": true
+              },
+              "phones": {
+                "isArray": true
+              }
+            }
+          },
+          "items": {
+            "isArray": true
+          },
+          "payables": {
+            "isArray": true
+          },
+          "readings": {
+            "isArray": true
+          },
+          "vehicle": {
+            "details": {
+              "features": {
+                "isArray": true
+              }
+            }
+          }
+        },
+        "employee": {
+          "details": {
+            "attachments": {
+              "isArray": true
+            },
+            "contact": {
+              "addresses": {
+                "isArray": true
+              },
+              "emails": {
+                "isArray": true
+              },
+              "phones": {
+                "isArray": true
+              }
+            }
+          }
+        },
+        "payments": {
+          "isArray": true
+        },
+        "returns": {
+          "isArray": true,
+          "readings": {
+            "isArray": true
+          }
+        }
+      }
+    },
     "properties": {
       "@timestamp": {
         "type": "date"

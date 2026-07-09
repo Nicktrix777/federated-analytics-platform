@@ -22,7 +22,7 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # Schemas to skip (system/internal)
-SKIP_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast", "_schema"}
+SKIP_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast", "_schema", "system"}
 _SKIP_SCHEMAS_SQL = ", ".join(f"'{s}'" for s in sorted(SKIP_SCHEMAS))
 
 

@@ -158,6 +158,15 @@ type SchemaRefreshResult struct {
 	Message      string `json:"message"`
 }
 
+// SyncCatalogsResult summarizes what SyncCatalogsFromTrino discovered:
+// newly-registered Trino catalogs (data_sources) and newly-registered
+// tables/indices (datasets) that weren't previously known to the platform.
+type SyncCatalogsResult struct {
+	NewSources  []string `json:"new_sources"`
+	NewDatasets []string `json:"new_datasets"`
+	Message     string   `json:"message"`
+}
+
 // ──────────────────────────────────────────────────────────
 // Dashboards (NEW)
 // ──────────────────────────────────────────────────────────
@@ -237,14 +246,24 @@ type WidgetPlan struct {
 	Explanation  string          `json:"explanation,omitempty"`
 }
 
+// DroppedWidget records a widget the AI proposed that never made it onto the
+// dashboard because its SQL could not be executed, even after repair
+// attempts. Surfacing these is what stops a generate/refine call from
+// reporting success while quietly discarding what the user asked for.
+type DroppedWidget struct {
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+}
+
 // DashboardPlan is the AI Engine's full dashboard proposal. The Core API
 // validates every widget's SQL before any of it reaches the database.
 type DashboardPlan struct {
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
-	Widgets     []WidgetPlan `json:"widgets"`
-	Confidence  float64      `json:"confidence"`
-	Explanation string       `json:"explanation"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	Widgets        []WidgetPlan    `json:"widgets"`
+	Confidence     float64         `json:"confidence"`
+	Explanation    string          `json:"explanation"`
+	DroppedWidgets []DroppedWidget `json:"dropped_widgets,omitempty"`
 }
 
 // ──────────────────────────────────────────────────────────

@@ -3,19 +3,21 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config holds all runtime configuration for the Core API.
 type Config struct {
-	Port            string
-	AIEngineURL     string
-	QueryServiceURL string
-	AIEnabled       bool
-	APIAuthToken    string
-	DatabaseDSN     string // postgres-meta (metadata + audit)
-	SourceDSN       string // postgres-source (user data + uploads)
-	TrinoHost       string // for schema refresh via Trino REST API
-	TrinoPort       string
+	Port                       string
+	AIEngineURL                string
+	QueryServiceURL            string
+	AIEnabled                  bool
+	APIAuthToken               string
+	DatabaseDSN                string // postgres-meta (metadata + audit)
+	SourceDSN                  string // postgres-source (user data + uploads)
+	TrinoHost                  string // for schema refresh via Trino REST API
+	TrinoPort                  string
+	CatalogSyncIntervalSeconds int // how often to auto-discover new Trino catalogs/tables
 }
 
 // Load reads configuration from environment variables.
@@ -47,16 +49,22 @@ func Load() *Config {
 		srcHost, srcPort, srcDB, srcUser, srcPass,
 	)
 
+	catalogSyncInterval, err := strconv.Atoi(getEnv("CATALOG_SYNC_INTERVAL_SECONDS", "300"))
+	if err != nil || catalogSyncInterval <= 0 {
+		catalogSyncInterval = 300
+	}
+
 	return &Config{
-		Port:            getEnv("CORE_API_PORT", "8081"),
-		AIEngineURL:     getEnv("AI_ENGINE_URL", "http://localhost:8082"),
-		QueryServiceURL: getEnv("QUERY_SERVICE_URL", "http://localhost:8083"),
-		AIEnabled:       aiEnabled,
-		APIAuthToken:    getEnv("API_AUTH_TOKEN", "poc-demo-token-2024"),
-		DatabaseDSN:     dsn,
-		SourceDSN:       sourceDSN,
-		TrinoHost:       getEnv("TRINO_HOST", "trino"),
-		TrinoPort:       getEnv("TRINO_PORT", "8080"),
+		Port:                       getEnv("CORE_API_PORT", "8081"),
+		AIEngineURL:                getEnv("AI_ENGINE_URL", "http://localhost:8082"),
+		QueryServiceURL:            getEnv("QUERY_SERVICE_URL", "http://localhost:8083"),
+		AIEnabled:                  aiEnabled,
+		APIAuthToken:               getEnv("API_AUTH_TOKEN", "poc-demo-token-2024"),
+		DatabaseDSN:                dsn,
+		SourceDSN:                  sourceDSN,
+		TrinoHost:                  getEnv("TRINO_HOST", "trino"),
+		TrinoPort:                  getEnv("TRINO_PORT", "8080"),
+		CatalogSyncIntervalSeconds: catalogSyncInterval,
 	}
 }
 

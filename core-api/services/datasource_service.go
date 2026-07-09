@@ -6,12 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/federated-analytics/core-api/models"
 )
+
+// trinoSystemCatalogs are Trino's built-in catalogs, not real registered
+// data sources — SyncCatalogsFromTrino skips these.
+var trinoSystemCatalogs = map[string]bool{
+	"system": true, "tpch": true, "tpcds": true, "jmx": true, "memory": true,
+}
+
+// allowedDataSourceTypes mirrors the data_sources.source_type CHECK constraint.
+var allowedDataSourceTypes = map[string]bool{
+	"postgresql": true, "mongodb": true, "elasticsearch": true, "mysql": true, "trino": true,
+}
 
 // DataSourceService manages registered data source connections.
 // It handles CRUD operations and schema refresh (fetching live schema
@@ -231,9 +244,203 @@ func (s *DataSourceService) RefreshSchema(id int) (*models.SchemaRefreshResult, 
 	}, nil
 }
 
+// SyncCatalogsFromTrino discovers every catalog Trino actually has configured
+// (postgres_source, mongodb, elasticsearch, and any future addition to
+// trino/catalog/*.properties) and registers any that aren't yet in
+// data_sources, then registers any table/index within each source that isn't
+// yet in the curated `datasets` table. This is what lets a newly-added
+// Elasticsearch index show up to the AI without a manual SQL insert.
+func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult, error) {
+	result := &models.SyncCatalogsResult{}
+
+	catalogs, err := s.discoverTrinoCatalogs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover trino catalogs: %w", err)
+	}
+
+	existing, err := s.List()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list existing data sources: %w", err)
+	}
+	known := map[string]bool{}
+	for _, ds := range existing {
+		known[ds.TrinoCatalog] = true
+	}
+
+	trinoPort, _ := strconv.Atoi(s.trinoPort)
+
+	for catalog, connector := range catalogs {
+		if trinoSystemCatalogs[catalog] || known[catalog] {
+			continue
+		}
+		sourceType := connector
+		if !allowedDataSourceTypes[sourceType] {
+			sourceType = "trino"
+		}
+		name := strings.ToUpper(catalog[:1]) + catalog[1:]
+
+		res, err := s.db.Exec(`
+			INSERT INTO data_sources
+			    (name, source_type, host, port, trino_catalog, extra_config, is_active)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, true)
+			ON CONFLICT (trino_catalog) DO NOTHING
+		`, name, sourceType, s.trinoHost, trinoPort, catalog, `{"auto_discovered": true}`)
+		if err != nil {
+			log.Printf("catalog sync: failed to register catalog %s: %v", catalog, err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			result.NewSources = append(result.NewSources, catalog)
+		}
+	}
+
+	// Re-list to include any sources inserted above.
+	sources, err := s.List()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list data sources: %w", err)
+	}
+
+	for _, ds := range sources {
+		schema, _, err := s.fetchSchemaFromTrino(ds.TrinoCatalog)
+		if err != nil {
+			log.Printf("catalog sync: schema fetch failed for %s: %v", ds.TrinoCatalog, err)
+			continue
+		}
+
+		schemaJSON, _ := json.Marshal(schema)
+		if _, err := s.db.Exec(`
+			UPDATE data_sources SET schema_cache = $1::jsonb, last_schema_refresh = $2 WHERE id = $3
+		`, string(schemaJSON), time.Now(), ds.ID); err != nil {
+			log.Printf("catalog sync: failed to cache schema for %s: %v", ds.TrinoCatalog, err)
+		}
+
+		newDatasets, err := s.syncDatasetsForCatalog(ds.TrinoCatalog, ds.SourceType, schema)
+		if err != nil {
+			log.Printf("catalog sync: dataset sync failed for %s: %v", ds.TrinoCatalog, err)
+			continue
+		}
+		result.NewDatasets = append(result.NewDatasets, newDatasets...)
+	}
+
+	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 {
+		s.invalidateAICache()
+	}
+
+	result.Message = fmt.Sprintf(
+		"Sync complete: %d new source(s), %d new dataset(s)",
+		len(result.NewSources), len(result.NewDatasets),
+	)
+	return result, nil
+}
+
+// discoverTrinoCatalogs returns catalog_name -> connector_name for every
+// catalog Trino is currently configured with. Falls back to SHOW CATALOGS
+// (no connector info) on Trino versions without system.metadata.catalogs.
+func (s *DataSourceService) discoverTrinoCatalogs() (map[string]string, error) {
+	rows, err := s.runTrinoQuery("SELECT catalog_name, connector_name FROM system.metadata.catalogs")
+	if err != nil {
+		rows, err = s.runTrinoQuery("SHOW CATALOGS")
+		if err != nil {
+			return nil, err
+		}
+		catalogs := map[string]string{}
+		for _, row := range rows {
+			if len(row) < 1 {
+				continue
+			}
+			catalogs[fmt.Sprintf("%v", row[0])] = ""
+		}
+		return catalogs, nil
+	}
+
+	catalogs := map[string]string{}
+	for _, row := range rows {
+		if len(row) < 2 {
+			continue
+		}
+		catalogs[fmt.Sprintf("%v", row[0])] = fmt.Sprintf("%v", row[1])
+	}
+	return catalogs, nil
+}
+
+// syncDatasetsForCatalog registers any table/index discovered via Trino that
+// isn't yet represented in the curated `datasets` table, with a minimal
+// auto-generated description and its columns — so it appears in the AI's
+// pre-loaded schema context next to hand-curated datasets instead of being
+// invisible.
+func (s *DataSourceService) syncDatasetsForCatalog(
+	catalog, sourceType string, schema map[string]interface{},
+) ([]string, error) {
+	tables, ok := schema["tables"].(map[string]map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	var added []string
+	for trinoPath, tbl := range tables {
+		parts := strings.SplitN(trinoPath, ".", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		tSchema, tTable := parts[1], parts[2]
+
+		var exists bool
+		if err := s.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM datasets
+				WHERE trino_catalog = $1 AND trino_schema = $2 AND trino_table = $3
+			)
+		`, catalog, tSchema, tTable).Scan(&exists); err != nil {
+			return added, fmt.Errorf("failed to check dataset existence for %s: %w", trinoPath, err)
+		}
+		if exists {
+			continue
+		}
+
+		name := tTable
+		var nameTaken bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM datasets WHERE name = $1)`, name).
+			Scan(&nameTaken); err != nil {
+			return added, fmt.Errorf("failed to check dataset name for %s: %w", trinoPath, err)
+		}
+		if nameTaken {
+			name = fmt.Sprintf("%s.%s", catalog, tTable)
+		}
+
+		var datasetID int
+		err := s.db.QueryRow(`
+			INSERT INTO datasets (name, description, source_type, trino_catalog, trino_schema, trino_table)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			RETURNING id
+		`, name,
+			"Auto-discovered from Trino — add a curated description via the Data Sources UI for richer AI context.",
+			sourceType, catalog, tSchema, tTable,
+		).Scan(&datasetID)
+		if err != nil {
+			return added, fmt.Errorf("failed to insert dataset for %s: %w", trinoPath, err)
+		}
+
+		cols, _ := tbl["columns"].([]map[string]string)
+		for _, col := range cols {
+			colName := col["name"]
+			isJoinable := strings.HasSuffix(colName, "_id") || colName == "id"
+			if _, err := s.db.Exec(`
+				INSERT INTO dataset_columns (dataset_id, column_name, data_type, is_joinable)
+				VALUES ($1, $2, $3, $4)
+			`, datasetID, colName, col["type"], isJoinable); err != nil {
+				log.Printf("catalog sync: failed to insert column %s.%s: %v", trinoPath, colName, err)
+			}
+		}
+
+		added = append(added, name)
+	}
+
+	return added, nil
+}
+
 // fetchSchemaFromTrino queries Trino's information_schema for a catalog.
 func (s *DataSourceService) fetchSchemaFromTrino(catalog string) (map[string]interface{}, int, error) {
-	skipSchemas := []string{"information_schema", "pg_catalog", "pg_toast", "_schema"}
+	skipSchemas := []string{"information_schema", "pg_catalog", "pg_toast", "_schema", "system"}
 	skipList := make([]string, len(skipSchemas))
 	for i, s := range skipSchemas {
 		skipList[i] = fmt.Sprintf("'%s'", s)

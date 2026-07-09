@@ -145,6 +145,20 @@ func (h *DataSourceHandler) HandleRefreshSchema(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// POST /api/datasources/sync — discover new Trino catalogs/tables and
+// register them (data_sources + datasets) without a manual SQL insert.
+func (h *DataSourceHandler) HandleSyncCatalogs(c *gin.Context) {
+	result, err := h.svc.SyncCatalogsFromTrino()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, models.ErrorResponse{
+			Error:   "Catalog sync failed",
+			Details: err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 // POST /api/datasources/refresh-all — refresh schemas for all active sources
 func (h *DataSourceHandler) HandleRefreshAll(c *gin.Context) {
 	sources, err := h.svc.List()

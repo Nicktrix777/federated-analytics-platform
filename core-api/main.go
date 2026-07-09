@@ -46,6 +46,13 @@ func main() {
 	)
 	dashboardSvc := services.NewDashboardService(db)
 
+	// ── Catalog Auto-Sync ────────────────────────────
+	// Discovers new Trino catalogs/tables (e.g. a freshly added Elasticsearch
+	// index) and registers them without any manual SQL insert. Runs once at
+	// startup (retrying briefly since Trino may still be starting) and then
+	// on a recurring interval.
+	go runCatalogSyncLoop(dataSourceSvc, cfg.CatalogSyncIntervalSeconds)
+
 	// ── Handlers ────────────────────────────────────
 	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, cfg.AIEnabled)
 	healthHandler := handlers.NewHealthHandler(cfg.AIEnabled)
@@ -96,6 +103,7 @@ func main() {
 		api.DELETE("/datasources/:id", dataSourceHandler.HandleDelete)
 		api.POST("/datasources/:id/refresh", dataSourceHandler.HandleRefreshSchema)
 		api.POST("/datasources/refresh-all", dataSourceHandler.HandleRefreshAll)
+		api.POST("/datasources/sync", dataSourceHandler.HandleSyncCatalogs)
 
 		// ── Dashboards (NEW) ────────────────────────────────
 		api.GET("/dashboards", dashboardHandler.HandleList)
@@ -136,6 +144,33 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("Core API forced shutdown: %v", err)
+	}
+}
+
+// runCatalogSyncLoop runs an initial retry loop (Trino may still be starting
+// up when core-api boots) and then re-syncs on a fixed interval so newly
+// added Trino catalogs/indices surface without a manual DB insert.
+func runCatalogSyncLoop(svc *services.DataSourceService, intervalSeconds int) {
+	for attempt := 1; attempt <= 5; attempt++ {
+		if result, err := svc.SyncCatalogsFromTrino(); err != nil {
+			log.Printf("catalog sync: startup attempt %d/5 failed: %v", attempt, err)
+			time.Sleep(5 * time.Second)
+			continue
+		} else {
+			log.Printf("catalog sync: %s", result.Message)
+			break
+		}
+	}
+
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		result, err := svc.SyncCatalogsFromTrino()
+		if err != nil {
+			log.Printf("catalog sync: periodic sync failed: %v", err)
+			continue
+		}
+		log.Printf("catalog sync: %s", result.Message)
 	}
 }
 

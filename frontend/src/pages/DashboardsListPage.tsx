@@ -182,7 +182,11 @@ export default function DashboardsListPage() {
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={generating || !aiPrompt.trim()}>
-                  {generating ? "Designing dashboard… (up to a minute)" : "Generate Dashboard"}
+                  {generating ? (
+                    <><span className="spinner-sm" /> Designing dashboard… this can take a few minutes</>
+                  ) : (
+                    "Generate Dashboard"
+                  )}
                 </button>
               </div>
             </form>
