@@ -212,29 +212,29 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
     // ── Bar Chart (default — supports multi-series) ────────────
     const isHorizontal = rows.length > 8 || numericCols.length === 1;
 
-    const series = numericCols.slice(0, 4).map((colIdx, si) => ({
-      name: columns[colIdx],
-      type: "bar",
-      data: rows.map((r, ri) => ({
-        value: toNumber(r[colIdx]),
+    const series = numericCols.slice(0, 4).map((colIdx, si) => {
+      const seriesColor = baseColors[si % baseColors.length];
+
+      return {
+        name: columns[colIdx],
+        type: "bar",
         itemStyle: {
-          color: numericCols.length > 1
-            ? baseColors[si % baseColors.length]
-            : baseColors[ri % baseColors.length],
+          color: seriesColor,
           borderRadius: isHorizontal ? [0, 3, 3, 0] : [3, 3, 0, 0],
         },
-      })),
-      label: numericCols.length === 1 ? {
-        show: true,
-        position: isHorizontal ? "right" : "top",
-        color: "#64748b",
-        fontSize: 10,
-        formatter: (p: { value: number | null }) =>
-          p.value !== null && typeof p.value === "number"
-            ? (Number.isInteger(p.value) ? p.value.toLocaleString() : p.value.toFixed(2))
-            : "",
-      } : undefined,
-    }));
+        data: rows.map((r) => toNumber(r[colIdx])),
+        label: numericCols.length === 1 ? {
+          show: true,
+          position: isHorizontal ? "right" : "top",
+          color: "#64748b",
+          fontSize: 10,
+          formatter: (p: { value: number | null }) =>
+            p.value !== null && typeof p.value === "number"
+              ? (Number.isInteger(p.value) ? p.value.toLocaleString() : p.value.toFixed(2))
+              : "",
+        } : undefined,
+      };
+    });
 
     if (isHorizontal) {
       return {
@@ -339,7 +339,10 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
       </div>
       <div className="card-body">
         <ReactECharts
+          key={`${userChartType}-${autoType}-${columns.join("|")}-${rows.length}`}
           option={chartOption}
+          notMerge={true}
+          replaceMerge={["series"]}
           style={{ height: "320px", width: "100%" }}
           opts={{ renderer: "svg" }}
         />
