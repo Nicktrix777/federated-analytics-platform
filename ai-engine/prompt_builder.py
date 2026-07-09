@@ -82,15 +82,22 @@ e.employee_id = CAST(ep.employee_id AS INTEGER)
      and MUST stay double-quoted or Trino misreads the hyphen as subtraction:
      elasticsearch.default."contracts-v2.40"
 
-2. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.)
+2. Column names, not just table names, need double-quoting if they contain anything
+   other than letters/digits/underscores. Elasticsearch's standard timestamp field is
+   literally named "@timestamp" — the "@" is invalid in a bare identifier and Trino
+   will fail to parse it. ALWAYS quote it: ORDER BY "@timestamp" DESC, not
+   ORDER BY @timestamp DESC. The same applies to any other column starting with a
+   special character.
 
-3. For cross-source queries, use standard SQL JOINs — Trino handles federation automatically.
+3. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.)
 
-4. MongoDB field names are case-sensitive. Use exact names as listed above.
+4. For cross-source queries, use standard SQL JOINs — Trino handles federation automatically.
 
-5. Use LIMIT clauses when appropriate (avoid returning millions of rows).
+5. MongoDB field names are case-sensitive. Use exact names as listed above.
 
-6. For date arithmetic, use Trino date functions: date_trunc, date_add, current_date, etc.
+6. Use LIMIT clauses when appropriate (avoid returning millions of rows).
+
+7. For date arithmetic, use Trino date functions: date_trunc, date_add, current_date, etc.
 
 7. For string operations, use Trino functions: LOWER, UPPER, CONCAT, LIKE, etc.
 
@@ -306,6 +313,8 @@ Remember:
 - Use fully qualified table names (catalog.schema.table), copied verbatim
   from the "Trino reference" shown for each dataset — including any double
   quotes around a hyphenated/dotted segment (e.g. Elasticsearch indices)
+- Double-quote any column name with special characters too, not just table
+  names — e.g. "@timestamp", never bare @timestamp
 - MongoDB schema is "employee_db", never "default"
 - Only generate SELECT queries
 - For "Nth highest per group" use DENSE_RANK() in a CTE

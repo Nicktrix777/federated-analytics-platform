@@ -51,6 +51,14 @@ special characters with underscores, that table won't exist:
 - WRONG:   elasticsearch.default.contracts_v2_37
 - RIGHT:   elasticsearch.default."contracts-v2.37"
 
+This applies to COLUMN names too, not just tables. Elasticsearch's standard
+timestamp field is literally named "@timestamp" — the "@" is invalid in a bare
+identifier and breaks Trino's parser (it reads "@" as the start of a token it
+doesn't recognize). ALWAYS quote it:
+- WRONG:   ORDER BY @timestamp DESC
+- RIGHT:   ORDER BY "@timestamp" DESC
+Quote any other column starting with a special character the same way.
+
 ### Exact Column Names (MANDATORY)
 Use ONLY column names that appear verbatim in the provided schema context.
 NEVER invent plausible-sounding names — e.g. departments has "name" (not
