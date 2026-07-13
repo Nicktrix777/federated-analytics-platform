@@ -3,8 +3,6 @@ package models
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -68,25 +66,6 @@ type QueryResponse struct {
 }
 
 // ──────────────────────────────────────────────────────────
-// Audit Log
-// ──────────────────────────────────────────────────────────
-
-type AuditLog struct {
-	ID           int64      `json:"id"`
-	RequestID    uuid.UUID  `json:"request_id"`
-	UserToken    string     `json:"user_token"`
-	Question     string     `json:"question"`
-	Mode         string     `json:"mode"`
-	QueryPlan    *QueryPlan `json:"query_plan,omitempty"`
-	SQLExecuted  string     `json:"sql_executed"`
-	Status       string     `json:"status"`
-	ErrorMessage string     `json:"error_message,omitempty"`
-	RowCount     int        `json:"row_count"`
-	DurationMs   int64      `json:"duration_ms"`
-	CreatedAt    time.Time  `json:"created_at"`
-}
-
-// ──────────────────────────────────────────────────────────
 // Dataset Metadata
 // ──────────────────────────────────────────────────────────
 
@@ -112,20 +91,20 @@ type DatasetMeta struct {
 // ──────────────────────────────────────────────────────────
 
 type DataSource struct {
-	ID                 int        `json:"id"`
-	Name               string     `json:"name"`
-	SourceType         string     `json:"source_type"`
-	Host               string     `json:"host"`
-	Port               int        `json:"port"`
-	DatabaseName       string     `json:"database_name"`
-	Username           string     `json:"username,omitempty"`
-	ExtraConfig        string     `json:"extra_config,omitempty"` // JSON
-	TrinoCatalog       string     `json:"trino_catalog"`
-	IsActive           bool       `json:"is_active"`
-	SchemaCache        string     `json:"schema_cache,omitempty"` // JSON
-	LastSchemaRefresh  *time.Time `json:"last_schema_refresh,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                int        `json:"id"`
+	Name              string     `json:"name"`
+	SourceType        string     `json:"source_type"`
+	Host              string     `json:"host"`
+	Port              int        `json:"port"`
+	DatabaseName      string     `json:"database_name"`
+	Username          string     `json:"username,omitempty"`
+	ExtraConfig       string     `json:"extra_config,omitempty"` // JSON
+	TrinoCatalog      string     `json:"trino_catalog"`
+	IsActive          bool       `json:"is_active"`
+	SchemaCache       string     `json:"schema_cache,omitempty"` // JSON
+	LastSchemaRefresh *time.Time `json:"last_schema_refresh,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type CreateDataSourceRequest struct {
@@ -162,9 +141,10 @@ type SchemaRefreshResult struct {
 // newly-registered Trino catalogs (data_sources) and newly-registered
 // tables/indices (datasets) that weren't previously known to the platform.
 type SyncCatalogsResult struct {
-	NewSources  []string `json:"new_sources"`
-	NewDatasets []string `json:"new_datasets"`
-	Message     string   `json:"message"`
+	NewSources            []string `json:"new_sources"`
+	NewDatasets           []string `json:"new_datasets"`
+	InferredRelationships int      `json:"inferred_relationships"`
+	Message               string   `json:"message"`
 }
 
 // ──────────────────────────────────────────────────────────
@@ -188,8 +168,8 @@ type DashboardWidget struct {
 	Title         string    `json:"title"`
 	QuerySQL      string    `json:"query_sql"`
 	ChartType     string    `json:"chart_type"`
-	ChartConfig   string    `json:"chart_config"`   // JSON
-	GridPosition  string    `json:"grid_position"`  // JSON
+	ChartConfig   string    `json:"chart_config"`  // JSON
+	GridPosition  string    `json:"grid_position"` // JSON
 	RefreshRateMs int       `json:"refresh_rate_ms"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`

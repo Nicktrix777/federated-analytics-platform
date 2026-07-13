@@ -31,18 +31,18 @@ var allowedDataSourceTypes = map[string]bool{
 // from each source via Trino's information_schema and caching it).
 
 type DataSourceService struct {
-	db          *sql.DB
-	trinoHost   string
-	trinoPort   string
-	aiEngineURL string
+	db        *sql.DB
+	trinoHost string
+	trinoPort string
+	aiClient  *AIClient
 }
 
-func NewDataSourceService(db *sql.DB, trinoHost, trinoPort, aiEngineURL string) *DataSourceService {
+func NewDataSourceService(db *sql.DB, trinoHost, trinoPort string, aiClient *AIClient) *DataSourceService {
 	return &DataSourceService{
-		db:          db,
-		trinoHost:   trinoHost,
-		trinoPort:   trinoPort,
-		aiEngineURL: aiEngineURL,
+		db:        db,
+		trinoHost: trinoHost,
+		trinoPort: trinoPort,
+		aiClient:  aiClient,
 	}
 }
 
@@ -234,7 +234,7 @@ func (s *DataSourceService) RefreshSchema(id int) (*models.SchemaRefreshResult, 
 	}
 
 	// Invalidate AI Engine cache
-	s.invalidateAICache()
+	s.aiClient.InvalidateCache()
 
 	return &models.SchemaRefreshResult{
 		DataSourceID: id,
@@ -322,15 +322,232 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 		result.NewDatasets = append(result.NewDatasets, newDatasets...)
 	}
 
-	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 {
-		s.invalidateAICache()
+	// Derive cross-table join hints from the freshly-synced schema. This is
+	// what replaced the AI's old hardcoded relationship map — the join map is
+	// now discovered from live columns, so a newly-connected source gets join
+	// hints without any manual SQL or code change.
+	inferred, err := s.InferRelationships()
+	if err != nil {
+		log.Printf("catalog sync: relationship inference failed: %v", err)
+	}
+	result.InferredRelationships = inferred
+
+	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 || inferred > 0 {
+		s.aiClient.InvalidateCache()
 	}
 
 	result.Message = fmt.Sprintf(
-		"Sync complete: %d new source(s), %d new dataset(s)",
-		len(result.NewSources), len(result.NewDatasets),
+		"Sync complete: %d new source(s), %d new dataset(s), %d inferred relationship(s)",
+		len(result.NewSources), len(result.NewDatasets), inferred,
 	)
 	return result, nil
+}
+
+// inferColumn is a column as seen by relationship inference.
+type inferColumn struct {
+	name  string
+	dtype string
+}
+
+// inferTable is one registered dataset with its columns, for inference.
+type inferTable struct {
+	trinoPath string // directly-runnable (quoted) path
+	catalog   string
+	table     string // raw table/index name (lowercased for matching)
+	columns   []inferColumn
+}
+
+// InferRelationships derives cross-table join hints from the registered
+// datasets/columns and stores any NEW ones in table_relationships. It is:
+//   - non-destructive: never deletes or overwrites existing rows, so
+//     hand-curated relationships (added via the UI/SQL) always win;
+//   - idempotent: an existing (from,from_col,to,to_col) tuple is skipped;
+//   - high-precision: only two well-understood foreign-key patterns are
+//     proposed, so the AI's join map stays trustworthy rather than noisy.
+//
+// Patterns:
+//  1. FK → PK (same or cross source): a column `<x>_id` references a table
+//     whose name matches `<x>` (singular/plural) on its `id` (or `<x>_id`) key.
+//  2. Shared FK across sources: the same `<x>_id` column present in two tables
+//     in DIFFERENT catalogs is a strong federation-join signal (e.g. a Postgres
+//     table and a Mongo collection that both carry employee_id).
+//
+// When the two sides' declared types differ, a CAST cast_expression is stored
+// so the AI reconciles the mismatch instead of guessing.
+func (s *DataSourceService) InferRelationships() (int, error) {
+	tables, err := s.loadInferTables()
+	if err != nil {
+		return 0, err
+	}
+
+	// Index tables by candidate base names so `<x>_id` can find table `<x>`.
+	byName := map[string]*inferTable{}
+	for i := range tables {
+		t := &tables[i]
+		tn := t.table
+		byName[tn] = t
+		if strings.HasSuffix(tn, "es") {
+			byName[strings.TrimSuffix(tn, "es")] = t
+		}
+		if strings.HasSuffix(tn, "s") {
+			byName[strings.TrimSuffix(tn, "s")] = t
+		}
+	}
+
+	inserted := 0
+	for i := range tables {
+		from := &tables[i]
+		for _, col := range from.columns {
+			if !strings.HasSuffix(col.name, "_id") || len(col.name) <= 3 {
+				continue
+			}
+			entity := strings.TrimSuffix(col.name, "_id")
+
+			// Pattern 1: FK → PK on the referenced entity's table.
+			if target, ok := byName[entity]; ok && target.trinoPath != from.trinoPath {
+				if toCol, ok := pickKeyColumn(target, col.name); ok {
+					if s.insertRelationship(from, col, target, toCol, "one "+entity+" per row (inferred FK)") {
+						inserted++
+					}
+				}
+			}
+
+			// Pattern 2: same FK column shared across DIFFERENT sources.
+			for j := range tables {
+				other := &tables[j]
+				if other.catalog == from.catalog || other.trinoPath == from.trinoPath {
+					continue
+				}
+				// Emit one direction only (lexical order) to avoid duplicate mirrors.
+				if from.trinoPath >= other.trinoPath {
+					continue
+				}
+				if oc, ok := findColumn(other, col.name); ok {
+					if s.insertRelationship(from, col, other, oc, "shared "+col.name+" across sources (inferred)") {
+						inserted++
+					}
+				}
+			}
+		}
+	}
+
+	return inserted, nil
+}
+
+// loadInferTables loads active datasets and their columns in one query.
+func (s *DataSourceService) loadInferTables() ([]inferTable, error) {
+	rows, err := s.db.Query(`
+		SELECT d.id, d.trino_catalog, d.trino_schema, d.trino_table,
+		       dc.column_name, dc.data_type
+		FROM datasets d
+		LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
+		WHERE d.is_active = true
+		ORDER BY d.id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load datasets for inference: %w", err)
+	}
+	defer rows.Close()
+
+	order := []int{}
+	byID := map[int]*inferTable{}
+	for rows.Next() {
+		var id int
+		var catalog, schema, table string
+		var colName, colType sql.NullString
+		if err := rows.Scan(&id, &catalog, &schema, &table, &colName, &colType); err != nil {
+			return nil, fmt.Errorf("failed to scan inference row: %w", err)
+		}
+		t, ok := byID[id]
+		if !ok {
+			t = &inferTable{
+				trinoPath: buildTrinoPath(catalog, schema, table),
+				catalog:   catalog,
+				table:     strings.ToLower(table),
+			}
+			byID[id] = t
+			order = append(order, id)
+		}
+		if colName.Valid {
+			t.columns = append(t.columns, inferColumn{name: colName.String, dtype: colType.String})
+		}
+	}
+
+	out := make([]inferTable, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out, nil
+}
+
+// pickKeyColumn returns the primary-key-ish column of target to join onto:
+// prefer `id`, then the FK's own name (e.g. employees keyed on employee_id).
+func pickKeyColumn(target *inferTable, fkName string) (inferColumn, bool) {
+	if c, ok := findColumn(target, "id"); ok {
+		return c, true
+	}
+	if c, ok := findColumn(target, fkName); ok {
+		return c, true
+	}
+	return inferColumn{}, false
+}
+
+func findColumn(t *inferTable, name string) (inferColumn, bool) {
+	for _, c := range t.columns {
+		if c.name == name {
+			return c, true
+		}
+	}
+	return inferColumn{}, false
+}
+
+// baseType strips type parameters/precision, e.g. "DECIMAL(10,2)" -> "DECIMAL".
+func baseType(t string) string {
+	t = strings.ToUpper(strings.TrimSpace(t))
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		t = t[:i]
+	}
+	return t
+}
+
+// insertRelationship stores one inferred join hint if an identical tuple isn't
+// already present. Returns true when a row was inserted.
+func (s *DataSourceService) insertRelationship(
+	from *inferTable, fromCol inferColumn,
+	to *inferTable, toCol inferColumn,
+	description string,
+) bool {
+	var exists bool
+	if err := s.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM table_relationships
+			WHERE from_trino_path = $1 AND from_column = $2
+			  AND to_trino_path = $3 AND to_column = $4
+		)
+	`, from.trinoPath, fromCol.name, to.trinoPath, toCol.name).Scan(&exists); err != nil {
+		log.Printf("relationship inference: existence check failed: %v", err)
+		return false
+	}
+	if exists {
+		return false
+	}
+
+	// If declared types differ, cast the FROM side to the TO side's base type.
+	cast := ""
+	if baseType(fromCol.dtype) != baseType(toCol.dtype) && baseType(toCol.dtype) != "" {
+		cast = fmt.Sprintf("CAST(%s AS %s)", fromCol.name, baseType(toCol.dtype))
+	}
+
+	if _, err := s.db.Exec(`
+		INSERT INTO table_relationships
+		    (from_trino_path, from_column, to_trino_path, to_column, join_type, cast_expression, description)
+		VALUES ($1, $2, $3, $4, 'INNER', $5, $6)
+	`, from.trinoPath, fromCol.name, to.trinoPath, toCol.name, cast, description); err != nil {
+		log.Printf("relationship inference: insert failed for %s.%s -> %s.%s: %v",
+			from.trinoPath, fromCol.name, to.trinoPath, toCol.name, err)
+		return false
+	}
+	return true
 }
 
 // discoverTrinoCatalogs returns catalog_name -> connector_name for every
@@ -561,15 +778,4 @@ func (s *DataSourceService) runTrinoQuery(query string) ([][]interface{}, error)
 	}
 
 	return allRows, nil
-}
-
-// invalidateAICache tells the AI Engine to drop its schema cache.
-func (s *DataSourceService) invalidateAICache() {
-	url := s.aiEngineURL + "/api/invalidate-cache"
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", nil)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 }

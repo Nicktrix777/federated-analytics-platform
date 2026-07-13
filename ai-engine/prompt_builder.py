@@ -1,23 +1,25 @@
 """
-Prompt builder for the AI Engine.
+Prompt builder for the AI Engine fast path.
 
-Constructs structured system and user prompts from dataset metadata.
-The richer the metadata in postgres-meta, the better the AI output.
+Builds the single-shot system/user prompts entirely from LIVE metadata — the
+registered datasets/columns, the curated join relationships in postgres-meta's
+table_relationships, and recent successful queries from the audit log. There is
+NOTHING schema-specific baked in here: point the platform at a different set of
+data sources and the prompt reshapes itself. The only fixed content is
+source-agnostic Trino syntax guidance.
 
-Key improvements over v1:
-- Explicit relationship/FK mapping between tables and cross-source joins
-- Few-shot SQL examples covering hard query patterns (window functions, CTEs, cross-source JOINs)
-- Trino-specific syntax gotchas to prevent common LLM mistakes
-- Relationship context that the LLM uses to pick join keys automatically
+`build_system_prompt` is a pure function of (datasets, relationships, examples)
+— the caller (agents.main._try_fast_path) fetches those three from the cached
+metadata helpers and passes them in.
 """
 
-from typing import List
+from typing import List, Optional
+
 from models import DatasetMeta, PlanRequest
 
 
-def build_system_prompt(datasets: List[DatasetMeta]) -> str:
-    """Build the system prompt with schema context for the LLM."""
-
+def _render_schema_sections(datasets: List[DatasetMeta]) -> str:
+    """One block per registered dataset: description, source, Trino path, columns."""
     schema_sections = []
     for ds in datasets:
         col_lines = []
@@ -31,20 +33,86 @@ def build_system_prompt(datasets: List[DatasetMeta]) -> str:
                 line += " [JOIN KEY]"
             col_lines.append(line)
 
-        cols_str = (
-            "\n".join(col_lines) if col_lines else "  (no column metadata registered)"
+        cols_str = "\n".join(col_lines) if col_lines else "  (no column metadata registered)"
+        schema_sections.append(
+            f"### {ds.name}\n"
+            f"Description: {ds.description}\n"
+            f"Source type: {ds.source_type}\n"
+            f"Trino reference: {ds.trino_path}\n"
+            f"Columns:\n{cols_str}"
         )
 
-        schema_sections.append(f"""### {ds.name}
-Description: {ds.description}
-Source type: {ds.source_type}
-Trino reference: {ds.trino_path}
-Columns:
-{cols_str}""")
+    return "\n\n".join(schema_sections) if schema_sections else "(no datasets registered)"
 
-    schema_context = (
-        "\n\n".join(schema_sections) if schema_sections else "(no datasets registered)"
-    )
+
+def _render_relationships(relationships: Optional[List[dict]]) -> str:
+    """Render the curated join map from postgres-meta.table_relationships.
+
+    Each row already carries the exact join columns and (for cross-source joins)
+    the CAST expression that reconciles a type mismatch, so the model never has
+    to guess a join key or invent a cast.
+    """
+    if not relationships:
+        return (
+            "No curated relationships are registered. Infer joins from columns marked "
+            "[JOIN KEY] and from matching names (e.g. an `*_id` column referencing another "
+            "table's `id`). When joining ACROSS sources, the same logical id may have "
+            "different types (INTEGER vs VARCHAR) — CAST explicitly to reconcile them."
+        )
+
+    lines = [
+        "Use these known join relationships to pick join keys. When a cast_expression is "
+        "given, use it verbatim — it reconciles a cross-source type mismatch:"
+    ]
+    for r in relationships:
+        frm = f"{r.get('from_trino_path', '')}.{r.get('from_column', '')}"
+        to = f"{r.get('to_trino_path', '')}.{r.get('to_column', '')}"
+        join_type = (r.get("join_type") or "INNER").upper()
+        line = f"- {frm} = {to}  ({join_type} JOIN)"
+        if r.get("cast_expression"):
+            line += f"  [cast: {r['cast_expression']}]"
+        if r.get("description"):
+            line += f"  — {r['description']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_examples(examples: Optional[List[dict]]) -> str:
+    """Render few-shot examples from recent SUCCESSFUL queries (audit_logs).
+
+    These are dynamic: they reflect what has actually worked against the
+    currently-registered sources and improve as the platform is used. A fresh
+    deployment simply has none — the schema + relationships + Trino rules carry
+    it until real query history accumulates.
+    """
+    usable = [
+        e for e in (examples or [])
+        if (e.get("question") and (e.get("sql") or e.get("sql_executed")))
+    ]
+    if not usable:
+        return ""
+
+    blocks = ["## Proven Query Examples (from this platform's successful query history)\n"
+              "These queries ran successfully against the CURRENT data sources — follow their patterns:\n"]
+    for e in usable:
+        sql = (e.get("sql") or e.get("sql_executed") or "").strip()
+        blocks.append(f"---\nQ: \"{e['question']}\"\nSQL:\n{sql}")
+    blocks.append("---")
+    return "\n".join(blocks)
+
+
+def build_system_prompt(
+    datasets: List[DatasetMeta],
+    relationships: Optional[List[dict]] = None,
+    examples: Optional[List[dict]] = None,
+) -> str:
+    """Build the fast-path system prompt from live metadata only."""
+
+    schema_context = _render_schema_sections(datasets)
+    relationships_context = _render_relationships(relationships)
+    examples_context = _render_examples(examples)
+
+    examples_section = f"\n\n{examples_context}" if examples_context else ""
 
     return f"""You are a query planning assistant for a Federated Analytics Platform.
 Your job is to convert natural language questions into structured query plans with valid Trino SQL.
@@ -55,224 +123,52 @@ Your job is to convert natural language questions into structured query plans wi
 
 ## Table Relationships
 
-These are the known relationships between tables — use them to determine join keys:
-
-SAME-SOURCE JOINS (PostgreSQL):
-- employees.department_id → departments.id  (FK, always available for dept lookups)
-- employees.employee_id → performance_reviews.employee_id  (one employee, many reviews)
-- employees.employee_id → employees.manager_id  (self-join for org hierarchy)
-
-CROSS-SOURCE JOINS (PostgreSQL ↔ MongoDB — Trino federates automatically):
-- postgres_source.public.employees.employee_id = mongodb.employee_db.tasks.employee_id
-- postgres_source.public.employees.employee_id = mongodb.employee_db.employee_profiles.employee_id
-
-JOIN KEY RULE: employee_id is an INTEGER in PostgreSQL but may be a VARCHAR in MongoDB collections like employee_profiles.
-You MUST ALWAYS cast the MongoDB side when joining on employee_id to avoid type mismatches:
-e.employee_id = CAST(ep.employee_id AS INTEGER)
+{relationships_context}
 
 ## Trino SQL Rules
 
-1. Always use fully qualified table names: catalog.schema.table — copy the
-   exact "Trino reference" value shown for each dataset above VERBATIM,
-   including any double quotes. Never strip quotes or drop the catalog/schema
-   prefix, even if the table segment looks unusual.
-   - PostgreSQL tables: postgres_source.public.table_name
-   - MongoDB collections: mongodb.employee_db.collection_name  (schema is "employee_db", NOT "default")
-   - Elasticsearch indices often contain hyphens/dots (e.g. "contracts-v2.40")
-     and MUST stay double-quoted or Trino misreads the hyphen as subtraction:
-     elasticsearch.default."contracts-v2.40"
+1. Always use fully qualified table names: catalog.schema.table — copy the exact "Trino
+   reference" value shown for each dataset above VERBATIM, including any double quotes and
+   the exact schema segment. Never strip quotes, never substitute the schema (e.g. do not
+   replace a real schema with "default"), never drop the catalog prefix — even if a table
+   segment looks unusual.
 
-2. Column names, not just table names, need double-quoting if they contain anything
-   other than letters/digits/underscores. Elasticsearch's standard timestamp field is
-   literally named "@timestamp" — the "@" is invalid in a bare identifier and Trino
-   will fail to parse it. ALWAYS quote it: ORDER BY "@timestamp" DESC, not
-   ORDER BY @timestamp DESC. The same applies to any other column starting with a
-   special character.
+2. Column names, not just table names, need double-quoting if they contain anything other
+   than letters/digits/underscores. Elasticsearch's standard timestamp field is literally
+   named "@timestamp" — the "@" is invalid in a bare identifier and Trino will fail to parse
+   it. ALWAYS quote it: ORDER BY "@timestamp" DESC, not ORDER BY @timestamp DESC. The same
+   applies to any column starting with a special character, and to index/table names with
+   hyphens or dots (e.g. elasticsearch.default."orders-2024.01").
 
-3. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.)
+3. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.).
 
-4. For cross-source queries, use standard SQL JOINs — Trino handles federation automatically.
+4. For cross-source queries, use standard SQL JOINs — Trino federates automatically. When
+   joining on an id that differs in type between sources, CAST to reconcile (see the
+   relationships above; use the cast_expression when one is given).
 
-5. MongoDB field names are case-sensitive. Use exact names as listed above.
+5. Field names are case-sensitive — use the exact names listed in the schema above.
 
-6. Use LIMIT clauses when appropriate (avoid returning millions of rows).
+6. Use LIMIT for non-aggregated queries (avoid returning millions of rows).
 
-7. For date arithmetic, use Trino date functions: date_trunc, date_add, current_date, etc.
+7. Date/time: use Trino functions — date_trunc, date_add, date_diff, current_date, current_timestamp.
 
-7. For string operations, use Trino functions: LOWER, UPPER, CONCAT, LIKE, etc.
+8. NUMERIC/DECIMAL columns used in math: CAST(x AS DOUBLE) — e.g. AVG(CAST(col AS DOUBLE)),
+   because plain AVG on DECIMAL errors on some Trino versions.
 
-8. NUMERIC/DECIMAL columns (like salary, score): use CAST(x AS DOUBLE) if doing math.
+9. Window functions: RANK(), DENSE_RANK(), ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...).
+   For "Nth highest / top-N per group", use DENSE_RANK() in a CTE then filter WHERE rank <= N.
 
-9. For window functions use: RANK(), DENSE_RANK(), ROW_NUMBER(), OVER (PARTITION BY ... ORDER BY ...)
+10. Percentage/ratio: CAST(numerator AS DOUBLE) / NULLIF(denominator, 0) * 100  (NULLIF avoids
+    division by zero).
 
-10. For NTH item per group, use DENSE_RANK() in a CTE then filter WHERE rank = N.
+11. Array columns (tags, skills, etc.): use contains(array_col, 'value'). Do NOT use ARRAY_CONTAINS.
 
-11. For percentage/ratio calculations: CAST(numerator AS DOUBLE) / NULLIF(denominator, 0) * 100
+12. Boolean columns: compare with TRUE/FALSE, not 1/0.
 
-12. Array columns (skills, tags): use contains(array_col, 'value') to check if an item exists. Do NOT use ARRAY_CONTAINS.
-
-## Trino-Specific Gotchas
-
-- MongoDB schema name is "employee_db" — NEVER use "default" for MongoDB tables
-- Boolean columns (goals_met): compare with TRUE/FALSE, not 1/0
-- TIMESTAMP columns from MongoDB: use AT TIME ZONE or cast if needed
-- NULL handling: use COALESCE(col, 0) for numeric aggregations, IS NULL / IS NOT NULL for checks
-- For DECIMAL salary field: AVG(CAST(salary AS DOUBLE)) works; plain AVG(salary) may error on some Trino versions
-
-## Few-Shot Examples
-
-The following examples show correct Trino SQL for various question types. Use these patterns:
-
----
-Q: "What is the average salary per department?"
-SQL:
-SELECT department, ROUND(AVG(CAST(salary AS DOUBLE)), 2) AS avg_salary_inr
-FROM postgres_source.public.employees
-GROUP BY department
-ORDER BY avg_salary_inr DESC
-
----
-Q: "Show total tasks per department with completion rate"
-SQL:
-SELECT
-  e.department,
-  COUNT(t.task_id) AS total_tasks,
-  COUNT(CASE WHEN t.status = 'completed' THEN 1 END) AS completed_tasks,
-  ROUND(
-    CAST(COUNT(CASE WHEN t.status = 'completed' THEN 1 END) AS DOUBLE)
-    / NULLIF(COUNT(t.task_id), 0) * 100,
-    1
-  ) AS completion_rate_pct
-FROM postgres_source.public.employees e
-JOIN mongodb.employee_db.tasks t ON CAST(t.employee_id AS INTEGER) = e.employee_id
-GROUP BY e.department
-ORDER BY completion_rate_pct DESC
-
----
-Q: "Which employees have the highest performance scores and how many open tasks do they have?"
-SQL:
-SELECT
-  e.first_name,
-  e.last_name,
-  e.department,
-  ROUND(AVG(CAST(pr.score AS DOUBLE)), 2) AS avg_review_score,
-  COUNT(CASE WHEN t.status IN ('open', 'in_progress') THEN 1 END) AS open_tasks
-FROM postgres_source.public.employees e
-JOIN postgres_source.public.performance_reviews pr ON pr.employee_id = e.employee_id
-LEFT JOIN mongodb.employee_db.tasks t ON CAST(t.employee_id AS INTEGER) = e.employee_id
-GROUP BY e.employee_id, e.first_name, e.last_name, e.department
-ORDER BY avg_review_score DESC
-LIMIT 20
-
----
-Q: "Who are the top 3 highest paid employees in each department?" (or "Nth highest salary per department")
-SQL:
-WITH ranked AS (
-  SELECT
-    first_name,
-    last_name,
-    department,
-    salary,
-    DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS salary_rank
-  FROM postgres_source.public.employees
-  WHERE status = 'active'
-)
-SELECT first_name, last_name, department, salary, salary_rank
-FROM ranked
-WHERE salary_rank <= 3
-ORDER BY department, salary_rank
-
----
-Q: "Show employees hired in the last 2 years with their task count and average performance score"
-SQL:
-WITH recent_hires AS (
-  SELECT employee_id, first_name, last_name, department, hire_date
-  FROM postgres_source.public.employees
-  WHERE hire_date >= date_add('year', -2, current_date)
-    AND status = 'active'
-),
-task_counts AS (
-  SELECT employee_id, COUNT(*) AS task_count
-  FROM mongodb.employee_db.tasks
-  GROUP BY employee_id
-),
-avg_scores AS (
-  SELECT employee_id, ROUND(AVG(CAST(score AS DOUBLE)), 2) AS avg_score
-  FROM postgres_source.public.performance_reviews
-  GROUP BY employee_id
-)
-SELECT
-  rh.first_name,
-  rh.last_name,
-  rh.department,
-  rh.hire_date,
-  COALESCE(tc.task_count, 0) AS task_count,
-  COALESCE(s.avg_score, 0.0) AS avg_performance_score
-FROM recent_hires rh
-LEFT JOIN task_counts tc ON CAST(tc.employee_id AS INTEGER) = rh.employee_id
-LEFT JOIN avg_scores s ON s.employee_id = rh.employee_id
-ORDER BY rh.hire_date DESC
-
----
-Q: "What percentage of employees in each department prefer remote work?"
-SQL:
-SELECT
-  e.department,
-  COUNT(*) AS total_employees,
-  COUNT(CASE WHEN ep.remote_preference = 'fully_remote' THEN 1 END) AS fully_remote,
-  ROUND(
-    CAST(COUNT(CASE WHEN ep.remote_preference IN ('fully_remote', 'hybrid_2_days', 'hybrid_3_days') THEN 1 END) AS DOUBLE)
-    / NULLIF(COUNT(*), 0) * 100,
-    1
-  ) AS remote_or_hybrid_pct
-FROM postgres_source.public.employees e
-LEFT JOIN mongodb.employee_db.employee_profiles ep ON CAST(ep.employee_id AS INTEGER) = e.employee_id
-GROUP BY e.department
-ORDER BY remote_or_hybrid_pct DESC
-
----
-Q: "Show headcount and average salary per department location"
-SQL:
-SELECT
-  d.location,
-  d.name AS department,
-  d.headcount,
-  ROUND(AVG(CAST(e.salary AS DOUBLE)), 0) AS avg_salary_inr
-FROM postgres_source.public.departments d
-JOIN postgres_source.public.employees e ON e.department_id = d.id
-WHERE e.status = 'active'
-GROUP BY d.location, d.name, d.headcount
-ORDER BY d.location, avg_salary_inr DESC
-
----
-Q: "Which projects have the most overdue tasks and which department owns them?"
-SQL:
-SELECT
-  t.project,
-  e.department,
-  COUNT(*) AS overdue_task_count,
-  COUNT(DISTINCT t.employee_id) AS employees_affected
-FROM mongodb.employee_db.tasks t
-JOIN postgres_source.public.employees e ON e.employee_id = CAST(t.employee_id AS INTEGER)
-WHERE t.status != 'completed'
-  AND t.due_date < current_timestamp
-GROUP BY t.project, e.department
-ORDER BY overdue_task_count DESC
-LIMIT 15
-
----
-Q: "List all employees that know Elasticsearch"
-SQL:
-SELECT
-  e.first_name,
-  e.last_name,
-  e.department,
-  t.tags
-FROM postgres_source.public.employees e
-JOIN mongodb.employee_db.tasks t ON CAST(t.employee_id AS INTEGER) = e.employee_id
-WHERE contains(t.tags, 'Elasticsearch')
-
----
+13. Arrays of objects (Elasticsearch "nested" fields, shown in the schema as
+    `array(row(field1 type1, field2 type2, ...))`): read them with CROSS JOIN UNNEST(column),
+    supplying ONE alias per field of the row IN ORDER (copy the field names straight from the
+    schema type string). Supplying fewer aliases fails with "Column alias list has N entries...".
 
 ## Response Format
 
@@ -295,28 +191,27 @@ You MUST respond with a valid JSON object matching this exact schema:
 
 ## Important
 
-- If the question cannot be answered from the available datasets, set confidence to 0.1 and explain why in the explanation field.
-- If the question requires a cross-source JOIN, identify the join key from the [JOIN KEY] marked columns or the relationship map above.
-- The confidence score should reflect how well the available data matches the question.
-- For "Nth highest" or "top N per group" questions, ALWAYS use DENSE_RANK() in a CTE.
-- Never use "default" as the MongoDB schema — always use "employee_db".
+- Use ONLY tables and columns that appear in the "Available Data Sources" section above. If the
+  question needs data that isn't registered, set confidence below 0.3 and explain what's missing
+  in the explanation — do NOT invent plausible-sounding table or column names.
+- confidence should reflect how well the available data matches the question.
+- If the question requires a cross-source JOIN, pick the join key from the [JOIN KEY] columns or
+  the relationship map above.{examples_section}
 """
 
 
 def build_user_prompt(request: PlanRequest) -> str:
-    """Build the user message for the LLM."""
+    """Build the user message for the fast-path LLM call."""
     return f"""Convert the following question into a Trino SQL query plan:
 
 Question: {request.question}
 
 Remember:
-- Use fully qualified table names (catalog.schema.table), copied verbatim
-  from the "Trino reference" shown for each dataset — including any double
-  quotes around a hyphenated/dotted segment (e.g. Elasticsearch indices)
-- Double-quote any column name with special characters too, not just table
-  names — e.g. "@timestamp", never bare @timestamp
-- MongoDB schema is "employee_db", never "default"
-- Only generate SELECT queries
+- Use fully qualified table names (catalog.schema.table), copied VERBATIM from the "Trino
+  reference" shown for each dataset — including any double quotes and the exact schema segment
+- Double-quote any column name with special characters (e.g. "@timestamp", never bare @timestamp)
+- Only generate a SELECT query
+- Use ONLY tables/columns listed in the schema context — never invent names
 - For "Nth highest per group" use DENSE_RANK() in a CTE
 - Respond with valid JSON only — no markdown, no code blocks, just raw JSON
 """

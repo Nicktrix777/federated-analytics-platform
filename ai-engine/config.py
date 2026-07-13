@@ -75,6 +75,16 @@ class Settings(BaseSettings):
         description="Max time a request waits for a concurrency slot before failing fast with 503",
     )
 
+    # ── Agent depth control ──────────────────────────────────
+    agent_recursion_limit: int = Field(
+        default=20,
+        description=(
+            "LangGraph recursion_limit for deepagent runs — caps how many "
+            "graph steps (LLM turns + tool executions) one pipeline can take "
+            "before erroring, so a wandering agent can't spin for minutes"
+        ),
+    )
+
     # ── Schema/metadata tool cache (Phase 1) ─────────────────
     schema_tool_cache_ttl_seconds: float = Field(
         default=60.0,

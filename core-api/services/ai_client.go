@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,52 +47,83 @@ type DashboardPlanRequest struct {
 
 // GeneratePlan calls the AI Engine to convert a natural language question
 // into a structured QueryPlan.
-func (c *AIClient) GeneratePlan(question string, datasets []models.DatasetMeta) (*models.QueryPlan, error) {
+func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.DatasetMeta) (*models.QueryPlan, error) {
 	reqBody := PlanRequest{
 		Question: question,
 		Datasets: datasets,
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal AI request: %w", err)
-	}
-
-	resp, err := c.httpClient.Post(
-		c.baseURL+"/api/plan",
-		"application/json",
-		bytes.NewBuffer(bodyBytes),
-	)
+	resp, err := postJSON(c.httpClient, c.baseURL+"/api/plan", requestID, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("AI engine request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read AI engine response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("AI engine returned %d: %s", resp.StatusCode, string(respBytes))
-	}
 
 	var plan models.QueryPlan
-	if err := json.Unmarshal(respBytes, &plan); err != nil {
-		return nil, fmt.Errorf("failed to parse AI engine response: %w", err)
+	if err := decodeJSON(resp, "AI engine", &plan); err != nil {
+		return nil, err
 	}
-
 	return &plan, nil
+}
+
+// StreamPlan opens the AI Engine's streaming plan endpoint and invokes
+// onEvent for every SSE frame (pipeline progress, heartbeats, and the
+// terminal plan/error event). The caller decides what to forward and consumes
+// the terminal event itself. Returns transport-level errors, an HTTP error
+// status, or the first error returned by onEvent.
+func (c *AIClient) StreamPlan(
+	requestID, question string,
+	datasets []models.DatasetMeta,
+	onEvent func(SSEEvent) error,
+) error {
+	reqBody := PlanRequest{
+		Question: question,
+		Datasets: datasets,
+	}
+	return c.streamSSE("/api/plan/stream", requestID, reqBody, onEvent)
 }
 
 // GenerateDashboardPlan asks the AI Engine's dashboard designer for a full
 // dashboard proposal. Pass current != nil to refine an existing dashboard
 // with a natural-language instruction instead of creating one from scratch.
 func (c *AIClient) GenerateDashboardPlan(
-	prompt string,
+	requestID, prompt string,
 	datasets []models.DatasetMeta,
 	current *models.Dashboard,
 ) (*models.DashboardPlan, error) {
+	reqBody := buildDashboardPlanRequest(prompt, datasets, current)
+
+	resp, err := postJSON(c.httpClient, c.baseURL+"/api/dashboard-plan", requestID, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("AI engine request failed: %w", err)
+	}
+
+	var plan models.DashboardPlan
+	if err := decodeJSON(resp, "AI engine", &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
+}
+
+// StreamDashboardPlan is the streaming counterpart of GenerateDashboardPlan:
+// same request body, but pipeline progress arrives as SSE frames passed to
+// onEvent, terminating with a dashboard_plan or error event.
+func (c *AIClient) StreamDashboardPlan(
+	requestID, prompt string,
+	datasets []models.DatasetMeta,
+	current *models.Dashboard,
+	onEvent func(SSEEvent) error,
+) error {
+	reqBody := buildDashboardPlanRequest(prompt, datasets, current)
+	return c.streamSSE("/api/dashboard-plan/stream", requestID, reqBody, onEvent)
+}
+
+// buildDashboardPlanRequest assembles the designer payload shared by the
+// blocking and streaming dashboard-plan calls.
+func buildDashboardPlanRequest(
+	prompt string,
+	datasets []models.DatasetMeta,
+	current *models.Dashboard,
+) DashboardPlanRequest {
 	reqBody := DashboardPlanRequest{
 		Prompt:   prompt,
 		Datasets: datasets,
@@ -115,37 +145,28 @@ func (c *AIClient) GenerateDashboardPlan(
 			"widgets":     widgets,
 		}
 	}
+	return reqBody
+}
 
-	bodyBytes, err := json.Marshal(reqBody)
+// streamSSE POSTs payload to the AI Engine and parses the SSE response,
+// passing each frame to onEvent. The 300s client timeout bounds the whole
+// stream — the same budget the blocking pipeline endpoints already have.
+func (c *AIClient) streamSSE(
+	path, requestID string,
+	payload interface{},
+	onEvent func(SSEEvent) error,
+) error {
+	resp, err := postJSON(c.httpClient, c.baseURL+path, requestID, payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal dashboard request: %w", err)
-	}
-
-	resp, err := c.httpClient.Post(
-		c.baseURL+"/api/dashboard-plan",
-		"application/json",
-		bytes.NewBuffer(bodyBytes),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("AI engine request failed: %w", err)
+		return fmt.Errorf("AI engine request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read AI engine response: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("AI engine returned %d: %s", resp.StatusCode, string(respBytes))
+		respBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("AI engine returned %d: %s", resp.StatusCode, string(respBytes))
 	}
-
-	var plan models.DashboardPlan
-	if err := json.Unmarshal(respBytes, &plan); err != nil {
-		return nil, fmt.Errorf("failed to parse AI engine response: %w", err)
-	}
-
-	return &plan, nil
+	return parseSSEStream(resp.Body, onEvent)
 }
 
 // RepairWidgetRequest is the payload for fixing a single widget query that
@@ -159,8 +180,7 @@ type RepairWidgetRequest struct {
 }
 
 type repairWidgetResponse struct {
-	SQL     string `json:"sql"`
-	Changed bool   `json:"changed"`
+	SQL string `json:"sql"`
 }
 
 // RepairWidgetSQL asks the AI Engine to correct a widget query that failed to
@@ -168,7 +188,7 @@ type repairWidgetResponse struct {
 // repaired SQL — which the caller must still re-verify against the Query
 // Service, since the AI Engine never executes anything itself.
 func (c *AIClient) RepairWidgetSQL(
-	sql, execErr, chartType, title string,
+	requestID, sql, execErr, chartType, title string,
 	datasets []models.DatasetMeta,
 ) (string, error) {
 	reqBody := RepairWidgetRequest{
@@ -179,36 +199,35 @@ func (c *AIClient) RepairWidgetSQL(
 		Datasets:  datasets,
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal repair request: %w", err)
-	}
-
-	resp, err := c.httpClient.Post(
-		c.baseURL+"/api/repair-widget",
-		"application/json",
-		bytes.NewBuffer(bodyBytes),
-	)
+	resp, err := postJSON(c.httpClient, c.baseURL+"/api/repair-widget", requestID, reqBody)
 	if err != nil {
 		return "", fmt.Errorf("AI engine repair request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read AI engine repair response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("AI engine repair returned %d: %s", resp.StatusCode, string(respBytes))
-	}
 
 	var out repairWidgetResponse
-	if err := json.Unmarshal(respBytes, &out); err != nil {
-		return "", fmt.Errorf("failed to parse AI engine repair response: %w", err)
+	if err := decodeJSON(resp, "AI engine repair", &out); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(out.SQL) == "" {
 		return "", fmt.Errorf("AI engine repair returned empty SQL")
 	}
 	return out.SQL, nil
+}
+
+// InvalidateCache tells the AI Engine to drop its schema metadata cache so
+// newly uploaded tables and refreshed schemas appear in the next NL→SQL
+// prompt. Best-effort: failures are ignored — the cache expires naturally.
+func (c *AIClient) InvalidateCache() {
+	if c.baseURL == "" {
+		return
+	}
+	// Short dedicated timeout — this is fire-and-forget housekeeping and must
+	// not hold callers (upload, schema refresh) for the full pipeline budget.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(c.baseURL+"/api/invalidate-cache", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
 }

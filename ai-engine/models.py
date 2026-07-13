@@ -8,6 +8,7 @@ These models define the contract between:
 The Core API validates this output again before sending to the Query Service.
 """
 
+import re
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -76,10 +77,13 @@ class QueryPlan(BaseModel):
             raise ValueError(
                 f"SQL must be a SELECT or CTE query, got: {normalized[:50]}"
             )
+        # Word-boundary match, NOT substring — a bare `in` check rejected any
+        # SQL touching columns like updated_at / deleted_at / created_by.
         forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "GRANT"]
-        for kw in forbidden:
-            if kw in normalized:
-                raise ValueError(f"Forbidden keyword in SQL: {kw}")
+        pattern = r"\b(" + "|".join(forbidden) + r")\b"
+        match = re.search(pattern, normalized)
+        if match:
+            raise ValueError(f"Forbidden keyword in SQL: {match.group(1)}")
         return v
 
 
@@ -155,13 +159,3 @@ class RepairWidgetResponse(BaseModel):
     sql: str
     changed: bool = False
     explanation: str = ""
-
-
-# ──────────────────────────────────────────────────────────────
-# Error Response
-# ──────────────────────────────────────────────────────────────
-
-
-class ErrorResponse(BaseModel):
-    error: str
-    details: Optional[str] = None

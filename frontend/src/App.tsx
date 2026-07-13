@@ -13,6 +13,7 @@ import ResultsTable from "./components/ResultsTable";
 import ResultsChart from "./components/ResultsChart";
 import LeftSidebar from "./components/LeftSidebar";
 import FileUpload from "./components/FileUpload";
+import AIProgressTimeline from "./components/AIProgressTimeline";
 import { useQuery } from "./hooks/useQuery";
 import { api } from "./api/client";
 import type { DatasetMeta, QueryMode } from "./types";
@@ -59,8 +60,16 @@ function QueryPage() {
 
   const queryInputRef = useRef<QueryInputHandle>(null);
 
-  const { status, result, error, history, executeQuery, loadHistory, reset } =
-    useQuery();
+  const {
+    status,
+    result,
+    error,
+    history,
+    progress,
+    executeQuery,
+    loadHistory,
+    reset,
+  } = useQuery();
 
   const refreshDatasets = useCallback(async () => {
     try {
@@ -139,6 +148,13 @@ function QueryPage() {
               hasResults={!!result}
               onNewQuery={handleReset}
             />
+
+            {progress.length > 0 && status !== "idle" && (
+              <AIProgressTimeline
+                events={progress}
+                active={status === "loading"}
+              />
+            )}
 
             {status === "error" && error && (
               <div className="error-banner">

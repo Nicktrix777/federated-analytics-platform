@@ -8,11 +8,19 @@ Two paths produce a QueryPlan:
     common case — a question the pre-loaded context can already answer.
   - Full path: the deepagents multi-agent pipeline (schema-analyst +
     sql-generator), used only when the fast path is unavailable, fails
-    validation, or comes back with low confidence.
+    validation, or comes back with low confidence. The fast path's rejected
+    draft (SQL + why it failed) is handed off to the full pipeline so the
+    escalation repairs the draft instead of starting from scratch.
 
 Both paths run their SQL through the same deterministic safety/Trino-
 compatibility gate (agents.tools.validation_tools.validate_and_fix_sql)
 before it's returned — there's no separate "validator" LLM call.
+
+Streaming: every pipeline emits structured progress events (stage changes,
+every LLM call, every tool call, subagent hand-offs — see events.py). The
+/api/plan/stream and /api/dashboard-plan/stream endpoints expose those as SSE
+for the Core API to proxy to the frontend; the non-streaming endpoints still
+exist and return the same final JSON. Event contract: docs/sse-events.md.
 
 Architecture boundaries enforced here:
   1. This service has NO database write access (read-only metadata)
@@ -28,20 +36,21 @@ The Core API is responsible for:
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from config import settings
 from models import (
     DashboardPlan,
     DashboardPlanRequest,
-    ErrorResponse,
     PlanRequest,
     QueryPlan,
     RepairWidgetRequest,
@@ -52,6 +61,12 @@ from agents.dashboard_planner import create_dashboard_designer, generate_dashboa
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
 from agents.tools.validation_tools import validate_and_fix_sql
 from agents.tools._cache import clear_all as clear_tool_cache
+from agents.tools._common import close_shared_clients
+from agents.tools.metadata_tools import (
+    _async_get_relationships,
+    _async_get_patterns,
+)
+from events import EventEmitter, NullEmitter
 from prompt_builder import build_system_prompt, build_user_prompt
 from llm.openai_provider import OpenAIProvider
 
@@ -84,6 +99,17 @@ _widget_sql_provider: Optional[OpenAIProvider] = None
 # concurrent requests don't all hit OpenAI's rate limits simultaneously.
 _plan_semaphore = asyncio.Semaphore(settings.ai_max_concurrent_plans)
 
+# Strong references to in-flight streaming pipeline tasks — asyncio only
+# keeps weak references to tasks, so without this a streaming run could be
+# garbage-collected mid-pipeline.
+_stream_tasks: set = set()
+
+
+def _spawn_stream_task(coro) -> None:
+    task = asyncio.create_task(coro)
+    _stream_tasks.add(task)
+    task.add_done_callback(_stream_tasks.discard)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -115,6 +141,7 @@ async def lifespan(app: FastAPI):
         _agent = None
         _dashboard_agent = None
     yield
+    await close_shared_clients()
     logger.info("AI Engine shutting down")
 
 
@@ -125,7 +152,7 @@ app = FastAPI(
         "Converts natural language questions into structured Trino query plans "
         "using a deepagents multi-agent architecture."
     ),
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -136,6 +163,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",  # tell nginx/proxies not to buffer the stream
+}
+
 
 # ── Health Check ──────────────────────────────────────────────
 @app.get("/health")
@@ -143,7 +176,7 @@ async def health():
     return {
         "status": "ok",
         "service": "ai-engine",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "agent": "deepagents",
         "model": settings.llm_model,
         "agent_ready": _agent is not None,
@@ -153,8 +186,49 @@ async def health():
 
 
 # ── Helpers ────────────────────────────────────────────────────
-def _build_extra_context(datasets) -> Optional[str]:
-    """Render Core API's pre-loaded dataset metadata for an agent pipeline's prompt."""
+async def _load_relationships() -> list:
+    """Curated join relationships from postgres-meta (TTL-cached, deployment-global)."""
+    try:
+        data = json.loads(await _async_get_relationships())
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"Could not load relationships for prompt context: {e}")
+        return []
+
+
+async def _load_examples() -> list:
+    """Recent successful queries from the audit log — dynamic few-shots (TTL-cached)."""
+    try:
+        data = json.loads(await _async_get_patterns())
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"Could not load query examples for prompt context: {e}")
+        return []
+
+
+def _render_relationships_lines(relationships: list) -> list:
+    """Compact one-line-per-join rendering of curated relationships for extra_context."""
+    lines = []
+    for r in relationships:
+        frm = f"{r.get('from_trino_path', '')}.{r.get('from_column', '')}"
+        to = f"{r.get('to_trino_path', '')}.{r.get('to_column', '')}"
+        join_type = (r.get("join_type") or "INNER").upper()
+        line = f"  - {frm} = {to} ({join_type} JOIN)"
+        if r.get("cast_expression"):
+            line += f" [cast: {r['cast_expression']}]"
+        if r.get("description"):
+            line += f" — {r['description']}"
+        lines.append(line)
+    return lines
+
+
+async def _build_extra_context(datasets) -> Optional[str]:
+    """Render pre-loaded dataset metadata + live join relationships for a pipeline prompt.
+
+    Relationships are pulled from postgres-meta (TTL-cached) so a full-pipeline
+    run that SKIPS schema-analyst still sees the curated join map instead of
+    having to rediscover it. Nothing schema-specific is hardcoded here.
+    """
     if not datasets:
         return None
     schema_lines = []
@@ -165,7 +239,12 @@ def _build_extra_context(datasets) -> Optional[str]:
             schema_lines.append(
                 f"  - {col.column_name} ({col.data_type}): {col.description}"
             )
-    return "Pre-loaded schema context:\n" + "\n".join(schema_lines)
+
+    parts = ["Pre-loaded schema context:\n" + "\n".join(schema_lines)]
+    relationships = await _load_relationships()
+    if relationships:
+        parts.append("Known join relationships:\n" + "\n".join(_render_relationships_lines(relationships)))
+    return "\n\n".join(parts)
 
 
 def _apply_validation(plan: QueryPlan) -> QueryPlan:
@@ -177,50 +256,79 @@ def _apply_validation(plan: QueryPlan) -> QueryPlan:
     return plan.model_copy(update={"sql": result["fixed_sql"], "confidence": adjusted_confidence})
 
 
-async def _try_fast_path(request: PlanRequest) -> Optional[QueryPlan]:
+def _build_fastpath_hint(draft_sql: str, reason: str) -> str:
+    """Package a rejected fast-path attempt as a repair hint for the full pipeline.
+
+    The escalation used to discard the fast path's work entirely — hard
+    questions paid for the fast attempt AND a from-scratch full pipeline.
+    Handing the draft over lets sql-generator repair instead of rewrite.
+    """
+    return (
+        "First-pass draft (from a quick single-shot attempt — NOT validated, do not trust blindly):\n"
+        f"Draft SQL:\n{draft_sql}\n"
+        f"Why it was rejected: {reason}\n"
+        "If the draft's approach fits the question, REPAIR it (fix exactly what the rejection "
+        "describes) instead of starting from scratch. If the approach is wrong, ignore it."
+    )
+
+
+async def _try_fast_path(
+    request: PlanRequest, emitter: EventEmitter
+) -> Tuple[Optional[QueryPlan], Optional[str]]:
     """
     One cheap single-shot LLM call for questions the pre-loaded schema context
-    can already answer. Returns None (caller escalates to the full pipeline)
-    when there's no API key, the call errors, the SQL fails validation, or
-    confidence comes back below settings.fast_path_confidence_threshold.
+    can already answer.
+
+    Returns (plan, None) on success. On failure returns (None, hint) where
+    hint carries the rejected draft + rejection reason for the full pipeline
+    (or None when there is no useful draft to hand off).
     """
     if _fast_provider is None:
-        return None
+        return None, None
 
+    await emitter.emit("stage", stage="fast_path_started", detail=settings.fast_path_model)
+    await emitter.emit("llm", phase="start", agent="fast-path", model=settings.fast_path_model)
+    call_start = time.monotonic()
     try:
-        system_prompt = build_system_prompt(request.datasets)
+        # Relationships + few-shot examples are LIVE metadata (TTL-cached),
+        # not hardcoded — the prompt reshapes itself per deployment.
+        relationships, examples = await asyncio.gather(_load_relationships(), _load_examples())
+        system_prompt = build_system_prompt(request.datasets, relationships, examples)
         user_prompt = build_user_prompt(request)
         plan = await _fast_provider.generate_plan(system_prompt, user_prompt, request.question)
-        plan = _apply_validation(plan)
     except Exception as e:
-        logger.info(f"Fast path did not produce a usable plan, escalating: {e}")
-        return None
+        logger.info(f"Fast path call failed, escalating with no draft: {e}")
+        await emitter.emit("stage", stage="fast_path_rejected", detail=f"call failed: {e}")
+        return None, None
+    duration_ms = int((time.monotonic() - call_start) * 1000)
+    await emitter.emit("llm", phase="end", agent="fast-path", duration_ms=duration_ms)
 
-    if plan.confidence < settings.fast_path_confidence_threshold:
-        logger.info(
-            f"Fast path confidence {plan.confidence:.2f} below threshold "
-            f"{settings.fast_path_confidence_threshold}, escalating"
+    try:
+        validated = _apply_validation(plan)
+    except ValueError as e:
+        reason = f"failed deterministic SQL validation: {e}"
+        logger.info(f"Fast path rejected ({reason}), escalating with draft hand-off")
+        await emitter.emit("stage", stage="fast_path_rejected", detail=reason)
+        return None, _build_fastpath_hint(plan.sql, reason)
+
+    if validated.confidence < settings.fast_path_confidence_threshold:
+        reason = (
+            f"self-reported confidence {validated.confidence:.2f} below threshold "
+            f"{settings.fast_path_confidence_threshold}"
         )
-        return None
+        logger.info(f"Fast path rejected ({reason}), escalating with draft hand-off")
+        await emitter.emit("stage", stage="fast_path_rejected", detail=reason)
+        return None, _build_fastpath_hint(validated.sql, reason)
 
-    return plan
+    return validated, None
 
 
-# ── Plan Generation ────────────────────────────────────────────
-@app.post("/api/plan", response_model=QueryPlan)
-async def generate_plan(request: PlanRequest) -> QueryPlan:
+# ── Plan Pipeline (shared by /api/plan and /api/plan/stream) ──
+async def _run_plan_pipeline(request: PlanRequest, emitter: EventEmitter) -> Tuple[QueryPlan, str]:
+    """Full plan flow: semaphore → fast path → (escalate w/ hint) → validation.
+
+    Returns (plan, path_used). Raises HTTPException on every failure mode.
     """
-    Convert a natural language question into a structured Trino query plan.
-
-    Tries the fast single-shot path first (one cheap LLM call using Core
-    API's pre-loaded schema context). Only escalates to the full deepagents
-    multi-agent pipeline — schema-analyst + sql-generator — when the fast
-    path is unavailable, invalid, or low-confidence.
-
-    The Core API validates this response AGAIN before executing it.
-    """
-    global _agent
-
     try:
         await asyncio.wait_for(_plan_semaphore.acquire(), timeout=settings.ai_queue_timeout_seconds)
     except asyncio.TimeoutError:
@@ -234,9 +342,10 @@ async def generate_plan(request: PlanRequest) -> QueryPlan:
         logger.info(f"Generating plan for: {request.question[:100]}")
 
         plan = None
+        fastpath_hint = None
         path_used = "full"
         if settings.fast_path_enabled and request.datasets:
-            plan = await _try_fast_path(request)
+            plan, fastpath_hint = await _try_fast_path(request, emitter)
             if plan is not None:
                 path_used = "fast"
 
@@ -249,9 +358,13 @@ async def generate_plan(request: PlanRequest) -> QueryPlan:
                         "Check OPENAI_API_KEY and LLM_MODEL environment variables."
                     ),
                 )
-            extra_context = _build_extra_context(request.datasets)
+            await emitter.emit("stage", stage="pipeline_started", detail="full deepagents pipeline")
+            extra_context = await _build_extra_context(request.datasets)
+            if fastpath_hint:
+                extra_context = f"{extra_context}\n\n{fastpath_hint}" if extra_context else fastpath_hint
             try:
-                plan = await generate_query_plan(_agent, request.question, extra_context)
+                plan = await generate_query_plan(_agent, request.question, extra_context, emitter=emitter)
+                await emitter.emit("stage", stage="validating")
                 plan = _apply_validation(plan)
             except ValueError as e:
                 logger.error(f"Plan validation failed: {e}")
@@ -268,24 +381,56 @@ async def generate_plan(request: PlanRequest) -> QueryPlan:
             f"Plan generated via {path_used} path in {elapsed:.1f}s: "
             f"confidence={plan.confidence:.2f}, sql_len={len(plan.sql)}, steps={len(plan.steps)}"
         )
-        return plan
+        return plan, path_used
     finally:
         _plan_semaphore.release()
 
 
-# ── Dashboard Plan Generation ──────────────────────────────────
-@app.post("/api/dashboard-plan", response_model=DashboardPlan)
-async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
+# ── Plan Generation ────────────────────────────────────────────
+@app.post("/api/plan", response_model=QueryPlan)
+async def generate_plan(request: PlanRequest) -> QueryPlan:
     """
-    Design (or refine) a full dashboard from a natural-language brief.
+    Convert a natural language question into a structured Trino query plan.
 
-    Always runs the full deepagents pipeline — dashboard generation is a
-    one-time, multi-widget task where quality matters more than latency.
-    When request.current_dashboard is present the instruction is applied to
-    it and the complete updated plan is returned.
+    Tries the fast single-shot path first (one cheap LLM call using Core
+    API's pre-loaded schema context). Only escalates to the full deepagents
+    multi-agent pipeline — schema-analyst + sql-generator — when the fast
+    path is unavailable, invalid, or low-confidence; the rejected draft is
+    handed off as a repair hint.
 
-    The Core API validates every widget's SQL AGAIN before persisting.
+    The Core API validates this response AGAIN before executing it.
     """
+    plan, _ = await _run_plan_pipeline(request, NullEmitter())
+    return plan
+
+
+@app.post("/api/plan/stream")
+async def generate_plan_stream(request: PlanRequest, x_request_id: str = Header(default="")):
+    """
+    Same pipeline as /api/plan, but returns Server-Sent Events: stage
+    checkpoints, every LLM/tool call with durations and token usage, subagent
+    hand-offs, then a terminal `plan` (or `error`) event. See docs/sse-events.md.
+    """
+    emitter = EventEmitter(request_id=x_request_id)
+
+    async def run() -> None:
+        try:
+            plan, path_used = await _run_plan_pipeline(request, emitter)
+            await emitter.emit("plan", plan=plan.model_dump(), path=path_used)
+        except HTTPException as e:
+            await emitter.emit("error", detail=e.detail, status_code=e.status_code)
+        except Exception as e:
+            logger.error(f"Streaming plan pipeline crashed: {e}", exc_info=True)
+            await emitter.emit("error", detail=str(e), status_code=500)
+        finally:
+            await emitter.close()
+
+    _spawn_stream_task(run())
+    return StreamingResponse(emitter.iter_sse(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+# ── Dashboard Pipeline (shared by sync + stream endpoints) ────
+async def _run_dashboard_pipeline(request: DashboardPlanRequest, emitter: EventEmitter) -> DashboardPlan:
     if _dashboard_agent is None or _widget_sql_provider is None:
         raise HTTPException(
             status_code=503,
@@ -306,7 +451,8 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
     start = time.monotonic()
     try:
         logger.info(f"Generating dashboard for: {request.prompt[:100]}")
-        extra_context = _build_extra_context(request.datasets)
+        await emitter.emit("stage", stage="pipeline_started", detail="dashboard designer")
+        extra_context = await _build_extra_context(request.datasets)
 
         try:
             plan = await generate_dashboard_plan(
@@ -315,6 +461,7 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
                 _widget_sql_provider,
                 extra_context=extra_context,
                 current_dashboard=request.current_dashboard,
+                emitter=emitter,
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -323,6 +470,7 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
             raise HTTPException(status_code=502, detail=f"Dashboard designer failed: {str(e)}")
 
         # Deterministic safety gate per widget; drop the ones that fail.
+        await emitter.emit("stage", stage="validating", detail=f"{len(plan.widgets)} widgets")
         valid_widgets = []
         for w in plan.widgets:
             result = validate_and_fix_sql(w.sql)
@@ -347,6 +495,48 @@ async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
         return plan
     finally:
         _plan_semaphore.release()
+
+
+# ── Dashboard Plan Generation ──────────────────────────────────
+@app.post("/api/dashboard-plan", response_model=DashboardPlan)
+async def generate_dashboard(request: DashboardPlanRequest) -> DashboardPlan:
+    """
+    Design (or refine) a full dashboard from a natural-language brief.
+
+    Always runs the full deepagents pipeline — dashboard generation is a
+    one-time, multi-widget task where quality matters more than latency.
+    When request.current_dashboard is present the instruction is applied to
+    it and the complete updated plan is returned.
+
+    The Core API validates every widget's SQL AGAIN before persisting.
+    """
+    return await _run_dashboard_pipeline(request, NullEmitter())
+
+
+@app.post("/api/dashboard-plan/stream")
+async def generate_dashboard_stream(
+    request: DashboardPlanRequest, x_request_id: str = Header(default="")
+):
+    """
+    Same pipeline as /api/dashboard-plan, but returns Server-Sent Events,
+    ending with a terminal `dashboard_plan` (or `error`) event.
+    """
+    emitter = EventEmitter(request_id=x_request_id)
+
+    async def run() -> None:
+        try:
+            plan = await _run_dashboard_pipeline(request, emitter)
+            await emitter.emit("dashboard_plan", plan=plan.model_dump())
+        except HTTPException as e:
+            await emitter.emit("error", detail=e.detail, status_code=e.status_code)
+        except Exception as e:
+            logger.error(f"Streaming dashboard pipeline crashed: {e}", exc_info=True)
+            await emitter.emit("error", detail=str(e), status_code=500)
+        finally:
+            await emitter.close()
+
+    _spawn_stream_task(run())
+    return StreamingResponse(emitter.iter_sse(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 # ── Widget SQL Repair ──────────────────────────────────────────
@@ -394,7 +584,7 @@ async def repair_widget(request: RepairWidgetRequest) -> RepairWidgetResponse:
             detail="SQL repair unavailable — no OpenAI provider configured (set OPENAI_API_KEY)",
         )
 
-    schema_context = _build_extra_context(request.datasets) or "(no schema context provided)"
+    schema_context = await _build_extra_context(request.datasets) or "(no schema context provided)"
     user_prompt = (
         f"Widget title: {request.title or '(untitled)'}\n"
         f"Chart type: {request.chart_type}\n\n"

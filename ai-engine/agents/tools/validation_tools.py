@@ -48,11 +48,17 @@ def validate_and_fix_sql(sql: str) -> dict:
             "confidence_adjustment": -0.3,
         }
 
+    # Word-boundary match: trailing-space suffixes missed "UPDATE\n" while a
+    # bare substring check would false-positive on columns like updated_at.
     forbidden = [
-        "INSERT ", "UPDATE ", "DELETE ", "DROP ", "TRUNCATE ",
-        "ALTER ", "CREATE ", "GRANT ", "REVOKE ", "EXECUTE ",
+        "INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
+        "ALTER", "CREATE", "GRANT", "REVOKE", "EXECUTE",
     ]
-    forbidden_hits = [f"Forbidden keyword found: {kw.strip()}" for kw in forbidden if kw in normalized]
+    forbidden_hits = [
+        f"Forbidden keyword found: {kw}"
+        for kw in forbidden
+        if re.search(rf"\b{kw}\b", normalized)
+    ]
     if forbidden_hits:
         return {
             "is_valid": False,

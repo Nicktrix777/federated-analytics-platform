@@ -15,12 +15,12 @@ import type {
   AIDashboardResponse,
 } from "../types";
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
-const API_TOKEN =
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
+export const API_TOKEN =
   import.meta.env.VITE_API_TOKEN || "poc-demo-token-2024";
 
 const client = axios.create({
-  baseURL: BASE_URL,
+  baseURL: API_BASE_URL,
   headers: {
     "Content-Type": "application/json",
     Authorization: `Bearer ${API_TOKEN}`,
@@ -35,10 +35,13 @@ export const api = {
     question: string,
     mode: "ai" | "sql"
   ): Promise<QueryResponse> => {
-    const response = await client.post<QueryResponse>("/api/query", {
-      question,
-      mode,
-    });
+    const response = await client.post<QueryResponse>(
+      "/api/query",
+      { question, mode },
+      // The core-api waits up to 5 minutes for the AI engine in AI mode —
+      // the 120s instance default would abort the request too early.
+      { timeout: mode === "ai" ? 300000 : undefined }
+    );
     return response.data;
   },
 
@@ -57,10 +60,6 @@ export const api = {
     return response.data.datasets;
   },
 
-  health: async (): Promise<{ status: string; ai_enabled: boolean }> => {
-    const response = await client.get("/api/health");
-    return response.data;
-  },
 };
 
 // ── Data Sources API ──────────────────────────────────────────
@@ -83,22 +82,6 @@ export const dataSourcesApi = {
     return response.data;
   },
 
-  get: async (id: number): Promise<DataSource> => {
-    const response = await client.get<DataSource>(`/api/datasources/${id}`);
-    return response.data;
-  },
-
-  update: async (
-    id: number,
-    payload: Partial<CreateDataSourcePayload>
-  ): Promise<DataSource> => {
-    const response = await client.put<DataSource>(
-      `/api/datasources/${id}`,
-      payload
-    );
-    return response.data;
-  },
-
   delete: async (id: number): Promise<void> => {
     await client.delete(`/api/datasources/${id}`);
   },
@@ -107,14 +90,6 @@ export const dataSourcesApi = {
     const response = await client.post<SchemaRefreshResult>(
       `/api/datasources/${id}/refresh`
     );
-    return response.data;
-  },
-
-  refreshAll: async (): Promise<{
-    refreshed: SchemaRefreshResult[];
-    errors: string[];
-  }> => {
-    const response = await client.post("/api/datasources/refresh-all");
     return response.data;
   },
 
@@ -217,5 +192,3 @@ export const dashboardsApi = {
     );
   },
 };
-
-export default client;

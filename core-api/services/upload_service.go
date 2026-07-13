@@ -23,7 +23,7 @@ import (
 // table immediately appears in NL→SQL prompts.
 
 type UploadService struct {
-	sourceDSN string // postgres-source connection
+	sourceDSN string  // postgres-source connection
 	metaDB    *sql.DB // postgres-meta connection (already open)
 }
 
@@ -329,8 +329,8 @@ func inferColType(rows [][]string, colIdx int) string {
 }
 
 var datePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),           // YYYY-MM-DD
-	regexp.MustCompile(`^\d{2}/\d{2}/\d{4}$`),           // DD/MM/YYYY or MM/DD/YYYY
+	regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`),            // YYYY-MM-DD
+	regexp.MustCompile(`^\d{2}/\d{2}/\d{4}$`),            // DD/MM/YYYY or MM/DD/YYYY
 	regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}`), // ISO datetime
 }
 

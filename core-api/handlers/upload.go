@@ -1,35 +1,29 @@
 package handlers
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/federated-analytics/core-api/services"
 )
 
-const (
-	maxUploadSize   = 20 << 20 // 20 MB
-	aiEngineBaseURL = ""       // set via dependency injection
-)
+const maxUploadSize = 20 << 20 // 20 MB
 
 // UploadHandler handles CSV/Excel file uploads.
 // Flow: receive file → parse → create PG table → register metadata → invalidate AI cache
 type UploadHandler struct {
-	uploadSvc    *services.UploadService
-	aiEngineURL  string
+	uploadSvc *services.UploadService
+	aiClient  *services.AIClient
 }
 
-func NewUploadHandler(uploadSvc *services.UploadService, aiEngineURL string) *UploadHandler {
+func NewUploadHandler(uploadSvc *services.UploadService, aiClient *services.AIClient) *UploadHandler {
 	return &UploadHandler{
-		uploadSvc:   uploadSvc,
-		aiEngineURL: aiEngineURL,
+		uploadSvc: uploadSvc,
+		aiClient:  aiClient,
 	}
 }
 
@@ -78,7 +72,7 @@ func (h *UploadHandler) HandleUpload(c *gin.Context) {
 			return
 		}
 		// Invalidate AI engine cache so new table appears immediately
-		h.invalidateAICache()
+		h.aiClient.InvalidateCache()
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": fmt.Sprintf("Successfully uploaded '%s': %d rows, %d columns", filename, result.RowCount, len(result.Columns)),
@@ -98,7 +92,7 @@ func (h *UploadHandler) HandleUpload(c *gin.Context) {
 	}
 
 	// Invalidate AI engine cache so new table appears in the next NL query
-	h.invalidateAICache()
+	h.aiClient.InvalidateCache()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -108,24 +102,6 @@ func (h *UploadHandler) HandleUpload(c *gin.Context) {
 		),
 		"data": result,
 	})
-}
-
-// invalidateAICache tells the AI Engine to refresh its metadata cache
-// so the newly uploaded table appears in the next NL→SQL prompt.
-func (h *UploadHandler) invalidateAICache() {
-	if h.aiEngineURL == "" {
-		return
-	}
-	url := h.aiEngineURL + "/api/invalidate-cache"
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer([]byte("{}")))
-	if err != nil {
-		// Non-critical — cache will expire naturally
-		return
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 }
 
 // HandleUploadStatus returns metadata about a previously uploaded table.
@@ -142,10 +118,4 @@ func (h *UploadHandler) HandleUploadStatus(c *gin.Context) {
 		"trino_path": fmt.Sprintf("postgres_source.public.%s", tableName),
 		"sample_sql": fmt.Sprintf("SELECT * FROM postgres_source.public.%s LIMIT 10", tableName),
 	})
-}
-
-// jsonBody helper for internal requests
-func jsonBody(v interface{}) io.Reader {
-	b, _ := json.Marshal(v)
-	return bytes.NewReader(b)
 }

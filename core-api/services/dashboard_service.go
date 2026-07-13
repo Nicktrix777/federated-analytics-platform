@@ -189,17 +189,6 @@ func (s *DashboardService) CreateWidget(dashboardID int, req models.CreateWidget
 
 // UpdateWidget modifies a widget.
 func (s *DashboardService) UpdateWidget(dashboardID, widgetID int, req models.UpdateWidgetRequest) (*models.DashboardWidget, error) {
-	setRefresh := "refresh_rate_ms"
-	if req.RefreshRateMs != nil {
-		setRefresh = fmt.Sprintf("%d", *req.RefreshRateMs)
-	}
-	_ = setRefresh // handled via nullable param below
-
-	chartType := req.ChartType
-	if chartType == "" {
-		chartType = "table"
-	}
-
 	_, err := s.db.Exec(`
 		UPDATE dashboard_widgets
 		SET title       = CASE WHEN $1 = '' THEN title ELSE $1 END,

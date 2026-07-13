@@ -12,14 +12,9 @@ does not bloat the orchestrator's context window.
 """
 
 from agents.tools.schema_tools import (
-    list_available_sources,
-    get_tables_in_source,
+    get_schema_context,
     get_column_details,
     get_source_schema_summary,
-)
-from agents.tools.metadata_tools import (
-    get_dataset_descriptions,
-    get_table_relationships,
 )
 from config import settings
 from langchain.chat_models import init_chat_model
@@ -39,21 +34,17 @@ Your role is to understand the data landscape across ALL registered data sources
 (PostgreSQL databases, MongoDB collections, Elasticsearch indices, and any others)
 and provide precise, actionable schema context for query planning.
 
-## Your Workflow
+## Your Workflow — keep it to as FEW tool calls as possible
 
-1. **Discover Sources**: Use list_available_sources() to see all registered data connections.
+1. **Call get_schema_context() ONCE.** It returns everything registered on the platform in
+   one shot: all data sources, all curated datasets with columns/descriptions/sample values,
+   and all known join relationships (including cross-source joins). For most questions this
+   is the ONLY tool call you need — go straight to writing your answer from it.
 
-2. **Get Enriched Descriptions**: Use get_dataset_descriptions() first to get any manually 
-   curated metadata (descriptions, sample values, known join keys).
-
-3. **Explore Tables**: For each relevant source, use get_source_schema_summary() or
-   get_tables_in_source() to see what tables/indices are available.
-
-4. **Get Column Details**: For tables relevant to the question, use get_column_details()
-   to understand the exact schema including data types.
-
-5. **Find Relationships**: Use get_table_relationships() to identify how tables connect
-   across sources (e.g., PostgreSQL employee_id → Elasticsearch employee document).
+2. **Drill down ONLY if something is missing.** If the question needs a table that has no
+   curated dataset entry, use get_source_schema_summary(catalog) for a live listing of that
+   source, or get_column_details(trino_path) for one table's exact live schema. Do not
+   re-verify tables that get_schema_context already described.
 
 ## Output Format
 
@@ -83,12 +74,12 @@ SCHEMA_ANALYST_SUBAGENT = {
     # Cheap model — this subagent mostly calls tools and summarizes their
     # output, it doesn't need frontier-model reasoning like sql-generator does.
     "model": _SCHEMA_ANALYST_MODEL,
+    # Deliberately small tool surface: one consolidated overview tool plus two
+    # drill-downs. The old six-tool list, paired with a five-step workflow
+    # prompt, made every schema-analyst run cost 5-10 LLM round trips.
     "tools": [
-        list_available_sources,
-        get_tables_in_source,
-        get_column_details,
+        get_schema_context,
         get_source_schema_summary,
-        get_dataset_descriptions,
-        get_table_relationships,
+        get_column_details,
     ],
 }
