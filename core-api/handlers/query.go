@@ -1,12 +1,12 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"github.com/federated-analytics/core-api/middleware"
 	"github.com/federated-analytics/core-api/models"
@@ -58,11 +58,7 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 	c.Set(middleware.AuditQuestionKey, req.Question)
 	c.Set(middleware.AuditModeKey, req.Mode)
 
-	requestID, _ := c.Get(middleware.AuditRequestIDKey)
-	reqIDStr := ""
-	if rid, ok := requestID.(uuid.UUID); ok {
-		reqIDStr = rid.String()
-	}
+	reqIDStr := middleware.RequestIDFromContext(c)
 
 	var plan *models.QueryPlan
 	var sqlToExecute string
@@ -90,7 +86,7 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 		}
 
 		// Call AI Engine — it produces a QueryPlan, never executes anything
-		generatedPlan, err := h.aiClient.GeneratePlan(req.Question, datasets)
+		generatedPlan, err := h.aiClient.GeneratePlan(reqIDStr, req.Question, datasets)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, models.ErrorResponse{
 				Error:   "AI Engine failed to generate query plan",
@@ -144,7 +140,7 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 	c.Set(middleware.AuditSQLKey, sqlToExecute)
 
 	// Execute the validated SQL via the Query Service
-	result, err := h.queryClient.Execute(sqlToExecute)
+	result, err := h.queryClient.Execute(reqIDStr, sqlToExecute)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, models.ErrorResponse{
 			Error:   "Query execution failed",
@@ -159,6 +155,114 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 	c.Set(middleware.AuditStatusKey, "success")
 
 	c.JSON(http.StatusOK, models.QueryResponse{
+		RequestID:       reqIDStr,
+		Question:        req.Question,
+		Mode:            req.Mode,
+		Plan:            plan,
+		Columns:         result.Columns,
+		Rows:            result.Rows,
+		RowCount:        result.RowCount,
+		ExecutionTimeMs: result.ExecutionTimeMs,
+		AIEnabled:       h.aiEnabled,
+	})
+}
+
+// HandleQueryStream is POST /api/query/stream — the SSE variant of
+// HandleQuery (see docs/sse-events.md). AI mode only: SQL mode has no
+// pipeline to stream, so mode="sql" is rejected with 400 and callers should
+// use POST /api/query instead.
+//
+// Failures before the stream opens (bad request body, AI disabled, metadata
+// fetch) return plain JSON errors; once SSE has started, every failure is a
+// terminal `error` event.
+func (h *QueryHandler) HandleQueryStream(c *gin.Context) {
+	var req models.QueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+	// Store audit context
+	c.Set(middleware.AuditQuestionKey, req.Question)
+	c.Set(middleware.AuditModeKey, req.Mode)
+
+	if req.Mode != "ai" {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "Streaming supports mode=ai only",
+			Details: "Use POST /api/query for direct SQL execution",
+		})
+		c.Set(middleware.AuditStatusKey, "error")
+		return
+	}
+	if !h.aiEnabled {
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{
+			Error:   "AI mode is disabled",
+			Details: "Set AI_ENABLED=true in environment or use mode=sql",
+		})
+		c.Set(middleware.AuditStatusKey, "error")
+		return
+	}
+
+	datasets, err := h.metadataSvc.GetAllDatasets()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "Failed to fetch metadata",
+			Details: err.Error(),
+		})
+		c.Set(middleware.AuditStatusKey, "error")
+		c.Set(middleware.AuditErrorKey, err.Error())
+		return
+	}
+
+	reqIDStr := middleware.RequestIDFromContext(c)
+	sse := newSSEStream(c, reqIDStr)
+
+	fail := func(detail string, statusCode int) {
+		sse.emitError(detail, statusCode)
+		c.Set(middleware.AuditStatusKey, "error")
+		c.Set(middleware.AuditErrorKey, detail)
+	}
+
+	// Proxy the AI Engine's pipeline events; consume the terminal plan event.
+	terminal, ok := proxyAIStream(sse, "plan", func(onEvent func(services.SSEEvent) error) error {
+		return h.aiClient.StreamPlan(reqIDStr, req.Question, datasets, onEvent)
+	})
+	if !ok {
+		c.Set(middleware.AuditStatusKey, "error")
+		return
+	}
+
+	var planEvent struct {
+		Plan *models.QueryPlan `json:"plan"`
+	}
+	if err := json.Unmarshal(terminal, &planEvent); err != nil || planEvent.Plan == nil {
+		fail("AI Engine sent a malformed plan event", http.StatusBadGateway)
+		return
+	}
+	plan := planEvent.Plan
+
+	// ── VALIDATION BOUNDARY ── same safety gate as the non-streaming path.
+	if err := validateQueryPlan(plan); err != nil {
+		fail("AI Engine produced an invalid query plan: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	c.Set(middleware.AuditPlanKey, plan)
+	c.Set(middleware.AuditSQLKey, plan.SQL)
+
+	sse.emit("stage", gin.H{"stage": "executing_sql"})
+
+	result, err := h.queryClient.Execute(reqIDStr, plan.SQL)
+	if err != nil {
+		fail("Query execution failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	c.Set(middleware.AuditRowCountKey, result.RowCount)
+	c.Set(middleware.AuditStatusKey, "success")
+
+	// Terminal result event — same JSON shape as the non-streaming response.
+	sse.emit("result", models.QueryResponse{
 		RequestID:       reqIDStr,
 		Question:        req.Question,
 		Mode:            req.Mode,

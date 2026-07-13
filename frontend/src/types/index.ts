@@ -107,6 +107,36 @@ export interface HistoryEntry {
 export type QueryMode = "ai" | "sql";
 export type QueryStatus = "idle" | "loading" | "success" | "error";
 
+// ── AI streaming progress (SSE) ──────────────────────────────
+// One progress event received on a /stream endpoint. `type` is the SSE
+// event name ("stage" | "llm" | "tool" | "widget" | future types) and
+// `data` its JSON payload — see docs/sse-events.md.
+
+export interface AIProgressEventData {
+  stage?: string;
+  detail?: string;
+  phase?: "start" | "end";
+  agent?: string;
+  model?: string;
+  tool?: string;
+  duration_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  title?: string;
+  status?: string;
+  attempt?: number;
+  elapsed_ms?: number;
+  request_id?: string;
+  [key: string]: unknown;
+}
+
+export interface AIProgressEvent {
+  type: string;
+  data: AIProgressEventData;
+  /** Client-side receive time (Date.now()). */
+  ts: number;
+}
+
 // ── Dashboards ───────────────────────────────────────────────
 
 export type ChartType =

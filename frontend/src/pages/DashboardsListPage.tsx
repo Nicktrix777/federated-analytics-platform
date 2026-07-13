@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { dashboardsApi } from "../api/client";
-import type { Dashboard, CreateDashboardPayload } from "../types";
+import { streamAIOperation, SSEConnectionError } from "../api/sse";
+import AIProgressTimeline from "../components/AIProgressTimeline";
+import type {
+  Dashboard,
+  CreateDashboardPayload,
+  AIDashboardResponse,
+  AIProgressEvent,
+  AIProgressEventData,
+} from "../types";
 
 export default function DashboardsListPage() {
   const navigate = useNavigate();
@@ -15,6 +23,7 @@ export default function DashboardsListPage() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [generating, setGenerating] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [aiProgress, setAiProgress] = useState<AIProgressEvent[]>([]);
 
   const loadDashboards = useCallback(async () => {
     try {
@@ -49,14 +58,61 @@ export default function DashboardsListPage() {
     e.preventDefault();
     setGenerating(true);
     setAiError(null);
+    setAiProgress([]);
     try {
+      // Preferred path: stream progress events while the AI designs the
+      // dashboard. Falls back to the blocking endpoint if the stream
+      // cannot be established.
+      try {
+        const terminal = await streamAIOperation(
+          "/api/dashboards/generate/stream",
+          { prompt: aiPrompt },
+          ["dashboard"],
+          (type, data) =>
+            setAiProgress((prev) => [
+              ...prev,
+              { type, data: (data ?? {}) as AIProgressEventData, ts: Date.now() },
+            ])
+        );
+
+        if (terminal.type === "error") {
+          const data = terminal.data as { detail?: string } | undefined;
+          setAiError(data?.detail || "Dashboard generation failed. Please try again.");
+          return;
+        }
+
+        // Terminal `dashboard` event carries the same JSON as the
+        // non-streaming response; tolerate a bare dashboard object too.
+        const payload = terminal.data as
+          | AIDashboardResponse
+          | Dashboard
+          | undefined;
+        const dashboardId =
+          (payload as AIDashboardResponse)?.dashboard?.id ??
+          (payload as Dashboard)?.id;
+        if (dashboardId) {
+          navigate(`/dashboards/${dashboardId}`);
+        } else {
+          setAiError("Dashboard generation returned an unexpected response.");
+        }
+        return;
+      } catch (err) {
+        if (!(err instanceof SSEConnectionError)) throw err;
+        // Stream endpoint unreachable — use the non-streaming API.
+      }
+
       const result = await dashboardsApi.generate(aiPrompt);
       navigate(`/dashboards/${result.dashboard.id}`);
     } catch (err) {
       const detail =
         (err as { response?: { data?: { error?: string; details?: string } } })
           .response?.data;
-      setAiError(detail?.details || detail?.error || "Dashboard generation failed. Please try again.");
+      setAiError(
+        detail?.details ||
+          detail?.error ||
+          (err as Error).message ||
+          "Dashboard generation failed. Please try again."
+      );
     } finally {
       setGenerating(false);
     }
@@ -176,6 +232,13 @@ export default function DashboardsListPage() {
                 and writes the queries. You can rearrange everything or refine it with further
                 instructions afterwards.
               </p>
+              {generating && (
+                <AIProgressTimeline
+                  events={aiProgress}
+                  active
+                  title="Designing dashboard"
+                />
+              )}
               {aiError && <div className="form-error">{aiError}</div>}
               <div className="modal-footer">
                 <button type="button" className="btn btn-ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
@@ -183,7 +246,7 @@ export default function DashboardsListPage() {
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={generating || !aiPrompt.trim()}>
                   {generating ? (
-                    <><span className="spinner-sm" /> Designing dashboard… this can take a few minutes</>
+                    <><span className="spinner-sm" /> Designing dashboard…</>
                   ) : (
                     "Generate Dashboard"
                   )}

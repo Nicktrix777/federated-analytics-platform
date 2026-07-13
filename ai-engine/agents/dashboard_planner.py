@@ -31,6 +31,7 @@ from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
 from agents.orchestrator import _extract_json_from_files, _extract_json_plan, _normalize_content, run_agent
+from events import EventEmitter
 from agents.subagents.schema_analyst import SCHEMA_ANALYST_SUBAGENT
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
 from agents.tools.schema_tools import list_available_sources
@@ -123,9 +124,10 @@ data_requirements to what's specific to THAT widget.
 
 ## Rules
 - Use ONLY column names that appear verbatim in the schema context or schema-analyst output.
-  NEVER invent plausible-sounding names (e.g. departments has "name", NOT "department_name";
-  performance_reviews has "score", NOT "review_score"). If a column you need isn't listed,
-  delegate to schema-analyst to verify before describing the widget's data_requirements.
+  NEVER invent plausible-sounding names — a real column is often shorter or differently named
+  than you'd guess (e.g. a table may have "name" rather than "<entity>_name"). If a column you
+  need isn't listed, delegate to schema-analyst to verify before describing the widget's
+  data_requirements.
 - Shape each widget's data_requirements to its chart type (a "number" tile must yield exactly
   one value)
 - If the brief cannot be served by the available data, return your best partial dashboard
@@ -213,6 +215,7 @@ async def generate_dashboard_plan(
     sql_provider: OpenAIProvider,
     extra_context: Optional[str] = None,
     current_dashboard: Optional[dict] = None,
+    emitter: Optional[EventEmitter] = None,
 ) -> DashboardPlan:
     """
     Invoke the dashboard designer and extract a structured DashboardPlan.
@@ -223,6 +226,7 @@ async def generate_dashboard_plan(
         sql_provider: Cheap-model OpenAI client used for the one batched SQL call
         extra_context: Pre-loaded schema context from the Core API
         current_dashboard: Existing dashboard state when refining
+        emitter: Progress event sink for SSE streaming (NullEmitter if absent)
 
     Raises:
         ValueError: If the agent output cannot be parsed into a DashboardPlan
@@ -239,7 +243,9 @@ async def generate_dashboard_plan(
     logger.info(f"Invoking dashboard designer for: {prompt[:100]}")
 
     try:
-        raw_content, files, structured = await run_agent(agent, user_message)
+        raw_content, files, structured = await run_agent(
+            agent, user_message, emitter=emitter, agent_name="dashboard-designer"
+        )
         content = _normalize_content(raw_content)
         logger.debug(f"Designer output (last 500 chars): {content[-500:]}")
 
@@ -272,7 +278,15 @@ async def generate_dashboard_plan(
         # dataset pre-loaded (Core API sends the full catalog, not just the
         # relevant one), asking the model to echo that back risked truncating
         # the response before the JSON closed.
+        if emitter is not None:
+            await emitter.emit(
+                "stage",
+                stage="widget_sql_started",
+                detail=f"writing SQL for {len(widget_designs)} widgets in one batched call",
+            )
         sql_by_index = await _generate_widget_sql_batch(sql_provider, extra_context or "", widget_designs)
+        if emitter is not None:
+            await emitter.emit("stage", stage="widget_sql_done")
 
         return _build_dashboard_plan(data, prompt, sql_by_index)
     except Exception as e:

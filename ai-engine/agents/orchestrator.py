@@ -15,12 +15,18 @@ Python (see agents.tools.validation_tools.validate_and_fix_sql) rather than by
 a dedicated LLM subagent — that checklist doesn't need a model call, and
 dropping it removes 2-3 LLM round trips from every request.
 
-The orchestrator maintains a clean context window by delegating heavy work
-to isolated subagents. Only final outputs flow back to the orchestrator.
+Invocation is fully async (astream_events) so:
+  - tools run as coroutines on the service event loop (pooled connections),
+  - every LLM/tool call is surfaced as a progress event (SSE) and counted
+    into a per-agent depth profile that is logged for every request,
+  - a recursion_limit caps how long a wandering agent can spin.
+
+The final answer is captured with response_format= structured output — the
+framework runs a dedicated schema-enforced step after the ReAct loop, instead
+of trusting the model to end its chat reply with clean JSON. The regex
+extraction below survives only as a fallback.
 """
 
-import asyncio
-import functools
 import json
 import logging
 import re
@@ -28,14 +34,34 @@ from typing import Optional
 
 from deepagents import create_deep_agent
 from langchain.chat_models import init_chat_model
+from pydantic import BaseModel, Field
 
 from agents.subagents.schema_analyst import SCHEMA_ANALYST_SUBAGENT
 from agents.subagents.sql_generator import SQL_GENERATOR_SUBAGENT
 from agents.tools.schema_tools import list_available_sources
 from config import settings
+from events import AgentEventRelay, EventEmitter, NullEmitter
 from models import QueryPlan, QueryStep
 
 logger = logging.getLogger(__name__)
+
+
+# Enforced by response_format= — see create_query_planner.
+class QueryStepDesign(BaseModel):
+    step_id: int = 1
+    description: str = ""
+    catalog: str = ""
+    schema_name: str = "public"
+    table: str = ""
+
+
+class QueryPlanDesign(BaseModel):
+    question: str = ""
+    sql: str = Field(description="Complete Trino SELECT SQL from sql-generator")
+    steps: list[QueryStepDesign] = Field(default_factory=list)
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    explanation: str = ""
+
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are the Query Planner for a Federated Analytics Platform.
 
@@ -54,24 +80,20 @@ dataset names, Trino paths, and columns there.
 **Step 2 — SQL Generation (delegate to sql-generator)**
 Provide the schema context (pre-loaded or from schema-analyst) to the sql-generator subagent.
 The generator will produce a complete, Trino-compatible SQL query.
+If the user message contains a "first-pass draft" block (a failed quick attempt with its
+validation issues), pass the draft AND its issues to sql-generator so it can repair the draft
+instead of starting from scratch — unless the draft is clearly the wrong approach.
 
-**Step 3 — Return the QueryPlan**
-SQL safety and Trino-compatibility checks run automatically after you respond — you do NOT need
-to call a validator subagent. Just return a final JSON object in EXACTLY this format:
-{
-  "question": "<original question>",
-  "sql": "<Trino SQL from sql-generator>",
-  "steps": [
-    {"step_id": 1, "description": "...", "catalog": "...", "schema_name": "...", "table": "..."}
-  ],
-  "confidence": <0.0 to 1.0>,
-  "explanation": "<human-readable explanation of what the query does>"
-}
+**Step 3 — Return the plan**
+SQL safety and Trino-compatibility checks run automatically after you respond — you do NOT
+need to call a validator subagent. Your final answer is captured as structured data with these
+fields: question (the original question), sql (the Trino SQL from sql-generator, verbatim),
+steps (one entry per table read: step_id, description, catalog, schema_name, table),
+confidence (0.0-1.0), explanation (human-readable description of what the query does).
 
 ## Important Rules
 - NEVER generate INSERT, UPDATE, DELETE, or DDL statements
 - If confidence < 0.3, still return the plan with a clear explanation of limitations
-- The response JSON must be the LAST thing you output, with no text after it
 """
 
 
@@ -98,6 +120,7 @@ def create_query_planner(model: str = "openai:gpt-4o") -> object:
             SCHEMA_ANALYST_SUBAGENT,
             SQL_GENERATOR_SUBAGENT,
         ],
+        response_format=QueryPlanDesign,
     )
 
 
@@ -105,18 +128,21 @@ async def generate_query_plan(
     agent,
     question: str,
     extra_context: Optional[str] = None,
+    emitter: Optional[EventEmitter] = None,
 ) -> QueryPlan:
     """
     Invoke the query planner and extract a structured QueryPlan.
-    
+
     Args:
         agent: The compiled deepagent from create_query_planner()
         question: Natural language question from the user
-        extra_context: Optional additional context (e.g., pre-loaded schema)
-    
+        extra_context: Optional additional context (e.g., pre-loaded schema,
+            fast-path draft hand-off)
+        emitter: Progress event sink for SSE streaming (NullEmitter if absent)
+
     Returns:
         A validated QueryPlan Pydantic model
-    
+
     Raises:
         ValueError: If the agent output cannot be parsed into a QueryPlan
     """
@@ -127,22 +153,22 @@ async def generate_query_plan(
     logger.info(f"Invoking query planner for: {question[:100]}")
 
     try:
-        # Normalize content: the OpenAI Responses API (used by deepagents) returns
-        # content as a list of content blocks [{"type": "text", "text": "..."}]
-        # rather than a plain string. Flatten to a single string before parsing.
-        raw_content, files, _structured = await run_agent(agent, user_message)
-        content = _normalize_content(raw_content)
+        raw_content, files, structured = await run_agent(
+            agent, user_message, emitter=emitter, agent_name="query-planner"
+        )
 
-        logger.debug(f"Agent output (last 500 chars): {content[-500:]}")
-
-        # Extract the JSON plan from the output, falling back to anything the
-        # agent wrote to its virtual filesystem instead of the chat reply.
-        try:
-            plan_data = _extract_json_plan(content)
-        except ValueError:
-            plan_data = _extract_json_from_files(files, "sql")
-            if plan_data is None:
-                raise
+        if structured is not None:
+            plan_data = structured.model_dump() if hasattr(structured, "model_dump") else structured
+        else:
+            logger.warning("Planner returned no structured_response — falling back to text extraction")
+            content = _normalize_content(raw_content)
+            logger.debug(f"Agent output (last 500 chars): {content[-500:]}")
+            try:
+                plan_data = _extract_json_plan(content)
+            except ValueError:
+                plan_data = _extract_json_from_files(files, "sql")
+                if plan_data is None:
+                    raise
         return _build_query_plan(plan_data, question)
 
     except Exception as e:
@@ -150,31 +176,50 @@ async def generate_query_plan(
         raise ValueError(f"Query planning failed: {e}")
 
 
-async def run_agent(agent, user_message: str):
+async def run_agent(
+    agent,
+    user_message: str,
+    emitter: Optional[EventEmitter] = None,
+    agent_name: str = "agent",
+):
     """Invoke a deepagent and return (final message content, virtual files, structured_response).
 
-    deepagents/LangGraph agent.invoke() is synchronous — run it in a thread
-    pool so it doesn't block the uvicorn event loop (which would make the
-    /health endpoint unresponsive during long LLM pipelines).
+    Streams LangGraph events so every inner LLM call, tool call, and subagent
+    hand-off is (a) forwarded to the emitter for SSE and (b) counted into a
+    depth profile that is logged for every request — this is how we see what
+    the pipeline actually did instead of guessing. With a NullEmitter the
+    events still drive the logged depth profile.
 
     structured_response is populated only for agents built with a
-    response_format= schema (see create_dashboard_designer) — the framework
-    forces a dedicated structured-output step for it, which is far more
-    reliable than trusting the model to end its chat reply with clean JSON.
-    For agents without response_format this is None; callers fall back to
+    response_format= schema — the framework forces a dedicated
+    structured-output step for it, which is far more reliable than trusting
+    the model to end its chat reply with clean JSON. Callers fall back to
     parsing `content` (and, failing that, `files` — deepagents gives every
     agent built-in filesystem tools and will sometimes write a large
     structured output there instead of inlining it in the chat reply, or
     auto-evict a large tool result to a file).
     """
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        functools.partial(
-            agent.invoke,
-            {"messages": [{"role": "user", "content": user_message}]},
-        ),
-    )
+    if emitter is None:
+        emitter = NullEmitter()
+    relay = AgentEventRelay(emitter, agent_name)
+    config = {"recursion_limit": settings.agent_recursion_limit}
+    inputs = {"messages": [{"role": "user", "content": user_message}]}
+
+    result = None
+    root_run_id = None
+    async for event in agent.astream_events(inputs, config=config, version="v2"):
+        if root_run_id is None:
+            root_run_id = str(event.get("run_id", ""))
+        kind = event.get("event", "")
+        if kind in ("on_chat_model_start", "on_chat_model_end", "on_tool_start", "on_tool_end"):
+            await relay.handle(event)
+        elif kind == "on_chain_end" and str(event.get("run_id", "")) == root_run_id:
+            result = (event.get("data") or {}).get("output")
+
+    logger.info(f"{agent_name} depth profile: {relay.depth_profile()}")
+
+    if not isinstance(result, dict):
+        raise ValueError(f"Agent stream ended without a final state (got {type(result).__name__})")
 
     messages = result.get("messages", [])
     if not messages:
@@ -317,7 +362,7 @@ def _build_query_plan(data: dict, question: str) -> QueryPlan:
     confidence = max(0.0, min(1.0, confidence))
 
     return QueryPlan(
-        question=data.get("question", question),
+        question=data.get("question", question) or question,
         sql=sql,
         steps=steps,
         confidence=confidence,

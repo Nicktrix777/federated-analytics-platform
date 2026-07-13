@@ -1,16 +1,17 @@
 """
 Shared helpers for agent tools.
 
-Every tool in schema_tools.py / metadata_tools.py needs the same three
-things: a way to run its async implementation from deepagents' synchronous
-tool-calling context, a postgres-meta connection, and a Trino REST query
-runner. These used to be copy-pasted into every tool — they live here once.
+Every tool in schema_tools.py / metadata_tools.py needs the same things:
+a postgres-meta connection and a Trino REST query runner. Both are pooled
+module-wide — the agent pipeline is fully async now (agents are invoked with
+ainvoke/astream_events, and tools are async), so everything runs on the one
+uvicorn event loop and can share a connection pool. The old per-call
+run_sync/ThreadPoolExecutor/fresh-asyncpg-connection dance is gone.
 """
 
-import asyncio
-import concurrent.futures
 import contextlib
 import re
+from typing import Optional
 
 import asyncpg
 import httpx
@@ -55,34 +56,47 @@ def split_trino_path(trino_path: str) -> tuple:
     return catalog, schema, table
 
 
-def run_sync(coro):
-    """Run an async tool implementation from a synchronous @tool function.
+# ── Pooled clients (created lazily on the running event loop) ──
 
-    deepagents calls tools synchronously — usually from a worker thread with
-    no event loop (asyncio.run works), but occasionally from a thread that
-    already has a running loop. In that case the coroutine is handed to a
-    fresh thread so the running loop is never touched.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+_meta_pool: Optional[asyncpg.Pool] = None
+_trino_client: Optional[httpx.AsyncClient] = None
+
+
+async def _get_meta_pool() -> asyncpg.Pool:
+    global _meta_pool
+    if _meta_pool is None:
+        dsn = (
+            f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
+            f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
+        )
+        _meta_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+    return _meta_pool
+
+
+def _get_trino_client() -> httpx.AsyncClient:
+    global _trino_client
+    if _trino_client is None:
+        _trino_client = httpx.AsyncClient(timeout=30.0)
+    return _trino_client
+
+
+async def close_shared_clients() -> None:
+    """Release the pooled postgres-meta and Trino clients (app shutdown)."""
+    global _meta_pool, _trino_client
+    if _meta_pool is not None:
+        await _meta_pool.close()
+        _meta_pool = None
+    if _trino_client is not None:
+        await _trino_client.aclose()
+        _trino_client = None
 
 
 @contextlib.asynccontextmanager
 async def meta_connection():
-    """Async context manager yielding a connection to postgres-meta."""
-    dsn = (
-        f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
-        f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
-    )
-    conn = await asyncpg.connect(dsn)
-    try:
+    """Async context manager yielding a pooled connection to postgres-meta."""
+    pool = await _get_meta_pool()
+    async with pool.acquire() as conn:
         yield conn
-    finally:
-        await conn.close()
 
 
 async def run_trino_query(sql: str, source: str = "fap-ai-tools") -> list:
@@ -98,30 +112,30 @@ async def run_trino_query(sql: str, source: str = "fap-ai-tools") -> list:
     }
 
     all_rows: list = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, headers=headers, content=sql)
+    client = _get_trino_client()
+    resp = await client.post(url, headers=headers, content=sql)
+    resp.raise_for_status()
+    data = resp.json()
+
+    max_polls = 60
+    polls = 0
+    while polls < max_polls:
+        rows = data.get("data", [])
+        if rows:
+            all_rows.extend(rows)
+
+        next_uri = data.get("nextUri")
+        if not next_uri:
+            break
+
+        state = data.get("stats", {}).get("state", "")
+        if state in ("FAILED", "CANCELED"):
+            error = data.get("error", {}).get("message", "Unknown Trino error")
+            raise RuntimeError(f"Trino query failed: {error}")
+
+        resp = await client.get(next_uri, headers=headers)
         resp.raise_for_status()
         data = resp.json()
-
-        max_polls = 60
-        polls = 0
-        while polls < max_polls:
-            rows = data.get("data", [])
-            if rows:
-                all_rows.extend(rows)
-
-            next_uri = data.get("nextUri")
-            if not next_uri:
-                break
-
-            state = data.get("stats", {}).get("state", "")
-            if state in ("FAILED", "CANCELED"):
-                error = data.get("error", {}).get("message", "Unknown Trino error")
-                raise RuntimeError(f"Trino query failed: {error}")
-
-            resp = await client.get(next_uri, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            polls += 1
+        polls += 1
 
     return all_rows

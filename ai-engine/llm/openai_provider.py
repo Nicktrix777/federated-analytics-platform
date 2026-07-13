@@ -9,13 +9,12 @@ import json
 import logging
 from openai import AsyncOpenAI
 
-from llm.base import BaseLLMProvider
 from models import QueryPlan, QueryStep
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAIProvider(BaseLLMProvider):
+class OpenAIProvider:
     def __init__(self, api_key: str, model: str, max_retries: int = 5, timeout: float = 30.0):
         # The OpenAI SDK retries 429/5xx internally with exponential backoff
         # up to max_retries — this is what actually protects the fast path

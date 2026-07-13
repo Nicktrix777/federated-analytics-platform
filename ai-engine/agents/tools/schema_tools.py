@@ -8,8 +8,13 @@ These tools query:
 This is the core of the dynamic schema-awareness feature:
   New data sources registered through the UI are immediately available
   to the AI agents without any code changes.
+
+All tools are async — the agents are invoked with ainvoke/astream_events, so
+tool coroutines run directly on the service's event loop and share the pooled
+DB/Trino clients in _common.py.
 """
 
+import asyncio
 import json
 import logging
 
@@ -19,7 +24,6 @@ from agents.tools._cache import async_ttl_cache
 from agents.tools._common import (
     build_trino_path,
     meta_connection,
-    run_sync,
     run_trino_query,
     split_trino_path,
 )
@@ -33,13 +37,13 @@ _SKIP_SCHEMAS_SQL = ", ".join(f"'{s}'" for s in sorted(SKIP_SCHEMAS))
 
 
 @tool
-def list_available_sources() -> str:
+async def list_available_sources() -> str:
     """
     List all registered data sources (databases, Elasticsearch clusters, etc.)
     and their connection metadata. Returns a JSON string with source details
     including type, host, and available schemas/indices.
     """
-    return run_sync(_async_list_sources())
+    return await _async_list_sources()
 
 
 @async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
@@ -70,7 +74,32 @@ async def _async_list_sources() -> str:
 
 
 @tool
-def get_tables_in_source(trino_catalog: str) -> str:
+async def get_schema_context() -> str:
+    """
+    One-call overview of EVERYTHING registered on the platform: all data
+    sources, all curated datasets with their columns/descriptions/sample
+    values, and all known join relationships (including cross-source joins).
+    Call this FIRST — it usually contains everything needed to plan a query.
+    Only fall back to the narrower tools if something is missing from it.
+    """
+    # Local import to avoid a circular import (metadata_tools imports nothing
+    # from here, but keeping the dependency one-way at module load is safer).
+    from agents.tools.metadata_tools import _async_get_datasets, _async_get_relationships
+
+    sources, datasets, relationships = await asyncio.gather(
+        _async_list_sources(),
+        _async_get_datasets(),
+        _async_get_relationships(),
+    )
+    return json.dumps({
+        "data_sources": json.loads(sources),
+        "datasets": json.loads(datasets),
+        "relationships": json.loads(relationships),
+    }, indent=2)
+
+
+@tool
+async def get_tables_in_source(trino_catalog: str) -> str:
     """
     Get all tables/collections/indices in a given Trino catalog.
     Returns a JSON array of objects with schema and table names.
@@ -78,7 +107,7 @@ def get_tables_in_source(trino_catalog: str) -> str:
     Args:
         trino_catalog: The Trino catalog name (e.g., 'postgres_source', 'mongodb', 'elasticsearch')
     """
-    return run_sync(_async_get_tables(trino_catalog))
+    return await _async_get_tables(trino_catalog)
 
 
 @async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
@@ -108,7 +137,7 @@ async def _async_get_tables(catalog: str) -> str:
 
 
 @tool
-def get_column_details(trino_path: str) -> str:
+async def get_column_details(trino_path: str) -> str:
     """
     Get detailed column information for a specific table.
     Returns column names, data types, and any available descriptions.
@@ -116,7 +145,7 @@ def get_column_details(trino_path: str) -> str:
     Args:
         trino_path: Fully qualified path like 'catalog.schema.table'
     """
-    return run_sync(_async_get_columns(trino_path))
+    return await _async_get_columns(trino_path)
 
 
 @async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
@@ -171,7 +200,7 @@ async def _async_get_columns(trino_path: str) -> str:
 
 
 @tool
-def get_source_schema_summary(trino_catalog: str) -> str:
+async def get_source_schema_summary(trino_catalog: str) -> str:
     """
     Get a complete schema summary for a data source — all tables and their columns.
     Use this to understand what data is available in a source before planning a query.
@@ -179,7 +208,7 @@ def get_source_schema_summary(trino_catalog: str) -> str:
     Args:
         trino_catalog: The Trino catalog name (e.g., 'postgres_source', 'elasticsearch')
     """
-    return run_sync(_async_schema_summary(trino_catalog))
+    return await _async_schema_summary(trino_catalog)
 
 
 @async_ttl_cache(settings.schema_tool_cache_ttl_seconds)

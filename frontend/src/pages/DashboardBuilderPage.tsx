@@ -3,14 +3,19 @@ import { useParams, useNavigate } from "react-router-dom";
 import GridLayout, { Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-import { dashboardsApi, api } from "../api/client";
+import { dashboardsApi } from "../api/client";
+import { streamAIOperation, SSEConnectionError } from "../api/sse";
 import type {
   Dashboard,
   DashboardWidget,
   CreateWidgetPayload,
   ChartType,
+  AIDashboardResponse,
+  AIProgressEvent,
+  AIProgressEventData,
 } from "../types";
 import DashboardWidgetCard from "../components/DashboardWidgetCard";
+import AIProgressTimeline from "../components/AIProgressTimeline";
 
 const CHART_TYPES: { type: ChartType; label: string; icon: string }[] = [
   { type: "table", label: "Table", icon: "📋" },
@@ -56,6 +61,7 @@ export default function DashboardBuilderPage() {
   const [refineInstruction, setRefineInstruction] = useState("");
   const [refining, setRefining] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
+  const [refineProgress, setRefineProgress] = useState<AIProgressEvent[]>([]);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
   const [aiHadDroppedWidgets, setAiHadDroppedWidgets] = useState(false);
 
@@ -180,8 +186,49 @@ export default function DashboardBuilderPage() {
     if (!dashboardId) return;
     setRefining(true);
     setRefineError(null);
+    setRefineProgress([]);
     try {
-      const result = await dashboardsApi.refine(dashboardId, refineInstruction);
+      let result: AIDashboardResponse;
+
+      // Preferred path: stream progress events while the AI edits the
+      // dashboard. Falls back to the blocking endpoint if the stream
+      // cannot be established.
+      try {
+        const terminal = await streamAIOperation(
+          `/api/dashboards/${dashboardId}/refine/stream`,
+          { instruction: refineInstruction },
+          ["dashboard"],
+          (type, data) =>
+            setRefineProgress((prev) => [
+              ...prev,
+              { type, data: (data ?? {}) as AIProgressEventData, ts: Date.now() },
+            ])
+        );
+
+        if (terminal.type === "error") {
+          const data = terminal.data as { detail?: string } | undefined;
+          setRefineError(data?.detail || "Refinement failed. Please try again.");
+          return;
+        }
+
+        // Terminal `dashboard` event carries the same JSON as the
+        // non-streaming response; tolerate a bare dashboard object too.
+        const payload = terminal.data as AIDashboardResponse | Dashboard;
+        result =
+          (payload as AIDashboardResponse).dashboard != null
+            ? (payload as AIDashboardResponse)
+            : {
+                dashboard: payload as Dashboard,
+                explanation: "",
+                confidence: 1,
+                dropped_widgets: null,
+              };
+      } catch (err) {
+        if (!(err instanceof SSEConnectionError)) throw err;
+        // Stream endpoint unreachable — use the non-streaming API.
+        result = await dashboardsApi.refine(dashboardId, refineInstruction);
+      }
+
       setShowRefineModal(false);
       setRefineInstruction("");
       setAiSummary(result.explanation || "Dashboard updated.");
@@ -191,7 +238,12 @@ export default function DashboardBuilderPage() {
       const detail =
         (err as { response?: { data?: { error?: string; details?: string } } })
           .response?.data;
-      setRefineError(detail?.details || detail?.error || "Refinement failed. Please try again.");
+      setRefineError(
+        detail?.details ||
+          detail?.error ||
+          (err as Error).message ||
+          "Refinement failed. Please try again."
+      );
     } finally {
       setRefining(false);
     }
@@ -335,13 +387,24 @@ export default function DashboardBuilderPage() {
               <p className="form-hint">
                 The AI edits this dashboard in place: widgets you don't mention stay as they are.
               </p>
+              {refining && (
+                <AIProgressTimeline
+                  events={refineProgress}
+                  active
+                  title="Refining dashboard"
+                />
+              )}
               {refineError && <div className="form-error">{refineError}</div>}
               <div className="modal-footer">
                 <button type="button" className="btn btn-ghost" onClick={() => setShowRefineModal(false)} disabled={refining}>
                   Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={refining || !refineInstruction.trim()}>
-                  {refining ? "Applying changes… (up to a minute)" : "Apply Changes"}
+                  {refining ? (
+                    <><span className="spinner-sm" /> Applying changes…</>
+                  ) : (
+                    "Apply Changes"
+                  )}
                 </button>
               </div>
             </form>

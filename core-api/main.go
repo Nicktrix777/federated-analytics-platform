@@ -42,7 +42,7 @@ func main() {
 	metadataSvc := services.NewMetadataService(db)
 	uploadSvc := services.NewUploadService(cfg.SourceDSN, db)
 	dataSourceSvc := services.NewDataSourceService(
-		db, cfg.TrinoHost, cfg.TrinoPort, cfg.AIEngineURL,
+		db, cfg.TrinoHost, cfg.TrinoPort, aiClient,
 	)
 	dashboardSvc := services.NewDashboardService(db)
 
@@ -58,7 +58,7 @@ func main() {
 	healthHandler := handlers.NewHealthHandler(cfg.AIEnabled)
 	historyHandler := handlers.NewHistoryHandler(db)
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
-	uploadHandler := handlers.NewUploadHandler(uploadSvc, cfg.AIEngineURL)
+	uploadHandler := handlers.NewUploadHandler(uploadSvc, aiClient)
 	dataSourceHandler := handlers.NewDataSourceHandler(dataSourceSvc)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc, aiClient, queryClient, metadataSvc, cfg.AIEnabled)
 
@@ -86,6 +86,7 @@ func main() {
 	{
 		// ── Query & History ─────────────────────────────────
 		api.POST("/query", queryHandler.HandleQuery)
+		api.POST("/query/stream", queryHandler.HandleQueryStream) // SSE (docs/sse-events.md)
 		api.GET("/history", historyHandler.HandleHistory)
 
 		// ── Metadata & Upload ───────────────────────────────
@@ -109,7 +110,9 @@ func main() {
 		api.GET("/dashboards", dashboardHandler.HandleList)
 		api.POST("/dashboards", dashboardHandler.HandleCreate)
 		api.POST("/dashboards/generate", dashboardHandler.HandleGenerate)
+		api.POST("/dashboards/generate/stream", dashboardHandler.HandleGenerateStream) // SSE
 		api.POST("/dashboards/:id/refine", dashboardHandler.HandleRefine)
+		api.POST("/dashboards/:id/refine/stream", dashboardHandler.HandleRefineStream) // SSE
 		api.GET("/dashboards/:id", dashboardHandler.HandleGet)
 		api.PUT("/dashboards/:id", dashboardHandler.HandleUpdate)
 		api.DELETE("/dashboards/:id", dashboardHandler.HandleDelete)
@@ -123,7 +126,7 @@ func main() {
 		Addr:         fmt.Sprintf(":%s", cfg.Port),
 		Handler:      r,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 310 * time.Second, // Must exceed AI client timeout (300s) to avoid premature disconnect
+		WriteTimeout: 430 * time.Second, // Must cover AI client timeout (300s) + query execution (120s) so SSE streams aren't cut off mid-pipeline
 		IdleTimeout:  60 * time.Second,
 	}
 
