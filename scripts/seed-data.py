@@ -348,6 +348,33 @@ def _rand_dt(start: datetime.date, end: datetime.date) -> datetime.datetime:
                              random.randint(8, 19), random.randint(0, 59))
 
 
+# Seniority level 1 (most junior) … 5 (executive), inferred from the job title.
+# Drives both salary placement and the reporting hierarchy so "avg salary by
+# level" and org-chart queries are meaningful rather than random.
+def _seniority_level(title: str) -> int:
+    t = title.lower()
+    if any(k in t for k in ("cfo", "chief", "vp", "vice president", "head of", "director", "controller")):
+        return 5
+    if any(k in t for k in ("principal", "staff", "manager", "lead", "team lead")):
+        return 4
+    if "senior" in t or t.startswith("sr"):
+        return 3
+    if any(k in t for k in ("junior", "associate", "coordinator", "representative", "sdr", "analyst", "accountant", "recruiter", "specialist")):
+        return 1
+    return 2
+
+
+def _salary_for_level(level: int, lo: int, hi: int) -> int:
+    """Place salary within [lo, hi] according to seniority level (1..5), with
+    modest jitter, so senior titles reliably out-earn junior ones."""
+    frac = (level - 1) / 4.0
+    span = hi - lo
+    center = lo + frac * span
+    sal = center + random.uniform(-0.10, 0.10) * span
+    sal = max(lo, min(hi, sal))
+    return int(round(sal / 1000) * 1000)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  POSTGRESQL  ─  SOURCE DATABASE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -432,7 +459,8 @@ def seed_postgres(conn) -> List[Dict[str, Any]]:
             ln    = fake.last_name()
             email = f"{fn.lower()}.{ln.lower()}{random.randint(1,99)}@acme-corp.in"
             title = random.choice(titles)
-            sal   = round(random.uniform(sal_lo, sal_hi) / 1000) * 1000
+            level = _seniority_level(title)
+            sal   = _salary_for_level(level, sal_lo, sal_hi)
             hdate = _rand_date(hire_start, hire_end)
             st    = random.choice(STATUSES_EMP)
             phone = fake.phone_number()
@@ -444,11 +472,13 @@ def seed_postgres(conn) -> List[Dict[str, Any]]:
                 "department_id": dept_id_map[dept_name],
                 "department":    dept_name,
                 "job_title":     title,
+                "level":         level,
                 "hire_date":     hdate,
                 "salary":        sal,
                 "status":        st,
                 "phone":         phone,
                 "location":      dept_loc,
+                "manager_id":    None,   # filled in once the hierarchy is built
             })
 
     # Insert employees in one batch (no manager_id yet)
@@ -473,16 +503,39 @@ def seed_postgres(conn) -> List[Dict[str, Any]]:
         employees[idx]["employee_id"] = eid
         dept_employee_map[dept].append(eid)
 
-    # Assign managers: first employee per department becomes manager of the rest
+    # ── Reporting hierarchy ──────────────────────────────────────────────────
+    # Per department: the most-senior person is the department head (no
+    # manager); a tier of managers reports to the head; individual
+    # contributors are spread across those managers. This yields a real
+    # multi-level tree instead of "first employee manages everyone", so
+    # org-chart / span-of-control queries return something meaningful.
+    emp_by_id: Dict[int, Dict[str, Any]] = {e["employee_id"]: e for e in employees}
+    dept_heads: List[int] = []
     for dept_name, eids in dept_employee_map.items():
-        if len(eids) < 2:
+        if not eids:
             continue
-        manager_id = eids[0]
-        for eid in eids[1:]:
-            cur.execute("UPDATE employees SET manager_id = %s WHERE employee_id = %s",
-                        (manager_id, eid))
+        members = sorted(eids, key=lambda x: emp_by_id[x]["level"], reverse=True)
+        head = members[0]
+        emp_by_id[head]["manager_id"] = None
+        dept_heads.append(head)
 
-    print(f"  [PG] Inserted {len(employees)} employees")
+        rest = members[1:]
+        if not rest:
+            continue
+        n_managers = max(1, len(rest) // 5)
+        managers = rest[:n_managers]
+        ics      = rest[n_managers:]
+        for m in managers:
+            emp_by_id[m]["manager_id"] = head
+        for i, ic in enumerate(ics):
+            emp_by_id[ic]["manager_id"] = managers[i % len(managers)]
+
+    for e in employees:
+        cur.execute("UPDATE employees SET manager_id = %s WHERE employee_id = %s",
+                    (e["manager_id"], e["employee_id"]))
+
+    print(f"  [PG] Inserted {len(employees)} employees "
+          f"({len(dept_heads)} department heads)")
 
     # Update department headcounts
     cur.execute("""
@@ -516,35 +569,44 @@ def seed_postgres(conn) -> List[Dict[str, Any]]:
         "Q4-2024": datetime.date(2024, 12, 31),
     }
 
-    all_eids = [e["employee_id"] for e in employees]
+    strengths_pool = [
+        "Delivers consistently high-quality work", "Strong team collaborator",
+        "Excellent communication skills", "Proactively identifies problems",
+        "Technical depth in core domain", "Customer-centric mindset",
+        "Meets deadlines reliably", "Drives process improvements",
+    ]
+    improve_pool = [
+        "Can improve delegation skills", "Documentation could be more thorough",
+        "Should speak up more in cross-team meetings", "Time estimation accuracy",
+        "Needs to focus on strategic thinking", "Could mentor juniors more",
+    ]
 
+    # Every employee gets all four quarters of 2024 with a per-person score
+    # trajectory (a base level plus a gentle upward/downward slope and small
+    # noise), so quarter-over-quarter trend charts show real movement instead
+    # of independent random points.
     for emp in employees:
-        eid       = emp["employee_id"]
-        dept_eids = dept_employee_map[emp["department"]]
-        manager   = dept_eids[0] if len(dept_eids) > 0 else random.choice(all_eids)
+        eid = emp["employee_id"]
+        # Reviewer is the employee's manager; department heads (no manager) are
+        # reviewed by another department head to keep reviewer_id a valid FK
+        # without self-reviews.
+        manager = emp["manager_id"]
+        if manager is None:
+            others  = [h for h in dept_heads if h != eid]
+            manager = random.choice(others) if others else eid
 
-        # Each employee gets 2 reviews
-        for period in random.sample(REVIEW_PERIODS, 2):
-            score     = round(random.gauss(3.5, 0.8), 1)
-            score     = max(1.0, min(5.0, score))
+        base  = random.gauss(3.3, 0.5)
+        slope = random.uniform(-0.25, 0.35)
+
+        for qi, period in enumerate(REVIEW_PERIODS):
+            score     = base + slope * qi + random.gauss(0, 0.15)
+            score     = round(max(1.0, min(5.0, score)), 1)
             goals_met = score >= 3.5
             rdate     = period_dates[period] + datetime.timedelta(days=random.randint(-7, 7))
 
-            strengths_pool = [
-                "Delivers consistently high-quality work", "Strong team collaborator",
-                "Excellent communication skills", "Proactively identifies problems",
-                "Technical depth in core domain", "Customer-centric mindset",
-                "Meets deadlines reliably", "Drives process improvements",
-            ]
-            improve_pool = [
-                "Can improve delegation skills", "Documentation could be more thorough",
-                "Should speak up more in cross-team meetings", "Time estimation accuracy",
-                "Needs to focus on strategic thinking", "Could mentor juniors more",
-            ]
-
             review_records.append((
                 eid, manager, period, rdate,
-                round(score, 1), goals_met,
+                score, goals_met,
                 random.choice(strengths_pool), random.choice(improve_pool),
             ))
 
@@ -601,7 +663,10 @@ def seed_mongodb(db, employees: List[Dict[str, Any]]) -> None:
         {
             "table": "employee_profiles",
             "fields": [
-                {"name": "employee_id",            "type": "varchar",        "hidden": False},
+                # integer (not varchar) — the documents store int(employee_id)
+                # and it JOINs to postgres employees.employee_id (INTEGER); a
+                # varchar declaration here forced a type mismatch on that join.
+                {"name": "employee_id",            "type": "integer",        "hidden": False},
                 {"name": "bio",                    "type": "varchar",        "hidden": False},
                 {"name": "skills",                 "type": "array(varchar)", "hidden": False},
                 {"name": "remote_preference",      "type": "varchar",        "hidden": False},
@@ -928,6 +993,53 @@ def register_metadata(conn_meta, employees: List[Dict[str, Any]]) -> None:
 
     conn_meta.commit()
     cur.close()
+
+
+def register_relationships(conn_meta) -> None:
+    """Register curated cross-table join hints in table_relationships.
+
+    The AI Engine loads these so it picks the correct join keys — especially
+    for the cross-source PostgreSQL↔MongoDB joins on employee_id, which it
+    would otherwise have to guess. All employee_id columns are INTEGER on both
+    sides (see the MongoDB _schema), so no CAST is needed.
+    """
+    cur = conn_meta.cursor()
+    print("  [META] Registering table relationships …")
+
+    PG = "postgres_source.public"
+    MG = f"mongodb.{MONGO_DB_NAME}"
+
+    # (from_path, from_col, to_path, to_col, join_type, cast_expression, description)
+    rels = [
+        (f"{PG}.employees", "department_id", f"{PG}.departments", "id", "INNER", None,
+         "Each employee belongs to exactly one department."),
+        (f"{MG}.tasks", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
+         "Cross-source: each task is assigned to an employee (both INTEGER)."),
+        (f"{MG}.tasks", "created_by", f"{PG}.employees", "employee_id", "LEFT", None,
+         "Cross-source: the employee who created the task."),
+        (f"{MG}.employee_profiles", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
+         "Cross-source: one rich profile per employee (both INTEGER)."),
+        (f"{PG}.performance_reviews", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
+         "Each review belongs to the employee being reviewed."),
+        (f"{PG}.performance_reviews", "reviewer_id", f"{PG}.employees", "employee_id", "LEFT", None,
+         "The employee (usually the manager) who conducted the review."),
+    ]
+
+    # Idempotent: clear the relationships this seeder owns, then re-insert.
+    cur.execute(
+        "DELETE FROM table_relationships "
+        "WHERE from_trino_path LIKE 'postgres_source%%' OR from_trino_path LIKE 'mongodb%%'"
+    )
+    execute_values(cur, """
+        INSERT INTO table_relationships
+            (from_trino_path, from_column, to_trino_path, to_column,
+             join_type, cast_expression, description)
+        VALUES %s
+    """, rels)
+
+    conn_meta.commit()
+    cur.close()
+    print(f"  [META] Registered {len(rels)} table relationships")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

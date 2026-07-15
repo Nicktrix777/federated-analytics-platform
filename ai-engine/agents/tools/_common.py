@@ -62,6 +62,23 @@ _meta_pool: Optional[asyncpg.Pool] = None
 _trino_client: Optional[httpx.AsyncClient] = None
 
 
+async def _register_vector(conn) -> None:
+    """Register the pgvector codec on a new pool connection.
+
+    Lets asyncpg encode/decode `vector` columns as Python lists (used by the
+    schema-RAG embeddings table). No-op if the pgvector extension isn't
+    installed yet — the DB may predate migration 005, in which case the
+    schema-RAG features stay dormant and the rest of the tools work unchanged.
+    """
+    try:
+        from pgvector.asyncpg import register_vector
+        await register_vector(conn)
+    except Exception:
+        # Extension not present (unmigrated DB) or pgvector not installed —
+        # leave the connection usable for every non-vector query.
+        pass
+
+
 async def _get_meta_pool() -> asyncpg.Pool:
     global _meta_pool
     if _meta_pool is None:
@@ -69,7 +86,7 @@ async def _get_meta_pool() -> asyncpg.Pool:
             f"postgresql://{settings.postgres_meta_user}:{settings.postgres_meta_password}"
             f"@{settings.postgres_meta_host}:{settings.postgres_meta_port}/{settings.postgres_meta_db}"
         )
-        _meta_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+        _meta_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, init=_register_vector)
     return _meta_pool
 
 

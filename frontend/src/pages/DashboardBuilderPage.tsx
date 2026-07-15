@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import GridLayout, { Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -13,6 +13,7 @@ import type {
   AIDashboardResponse,
   AIProgressEvent,
   AIProgressEventData,
+  DroppedWidget,
 } from "../types";
 import DashboardWidgetCard from "../components/DashboardWidgetCard";
 import AIProgressTimeline from "../components/AIProgressTimeline";
@@ -44,6 +45,7 @@ const DEFAULT_WIDGET_FORM: WidgetFormState = {
 export default function DashboardBuilderPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const dashboardId = id ? Number(id) : null;
 
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -63,7 +65,16 @@ export default function DashboardBuilderPage() {
   const [refineError, setRefineError] = useState<string | null>(null);
   const [refineProgress, setRefineProgress] = useState<AIProgressEvent[]>([]);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
-  const [aiHadDroppedWidgets, setAiHadDroppedWidgets] = useState(false);
+  // Widgets the AI proposed but couldn't build — each carries the real reason
+  // (e.g. the Trino execution error). Surfaced so a partial result is never
+  // reported as a clean success.
+  const [aiDropped, setAiDropped] = useState<DroppedWidget[]>([]);
+
+  // Positions already persisted to the server, keyed by widget id. Lets us
+  // persist ONLY the widgets a drag/resize actually moved instead of PUTing
+  // every widget on every layout change (react-grid-layout fires
+  // onLayoutChange on mount and mid-interaction too).
+  const savedPositionsRef = useRef<Record<string, string>>({});
 
   const loadDashboard = useCallback(async () => {
     if (!dashboardId) return;
@@ -75,8 +86,10 @@ export default function DashboardBuilderPage() {
       setWidgets(dash.widgets ?? []);
 
       // Build react-grid-layout from widget grid_positions
+      const saved: Record<string, string> = {};
       const layouts: Layout[] = (dash.widgets ?? []).map((w) => {
         const pos = parseGridPos(w.grid_position);
+        saved[String(w.id)] = JSON.stringify({ x: pos.x, y: pos.y, w: pos.w, h: pos.h });
         return {
           i: String(w.id),
           x: pos.x,
@@ -85,6 +98,7 @@ export default function DashboardBuilderPage() {
           h: pos.h,
         };
       });
+      savedPositionsRef.current = saved;
       setLayout(layouts);
     } catch {
       // ignore
@@ -97,6 +111,21 @@ export default function DashboardBuilderPage() {
     loadDashboard();
   }, [loadDashboard]);
 
+  // Pick up the one-time AI result handed over from the generate flow, which
+  // navigates here right after creating the dashboard. Without this, generated
+  // dashboards silently lose any dropped-widget errors on navigation. Cleared
+  // from history so a refresh doesn't resurrect a stale banner.
+  useEffect(() => {
+    const navState = location.state as
+      | { aiSummary?: string; droppedWidgets?: DroppedWidget[] }
+      | null;
+    if (navState?.aiSummary || navState?.droppedWidgets?.length) {
+      setAiSummary(navState.aiSummary ?? "Dashboard created.");
+      setAiDropped(navState.droppedWidgets ?? []);
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location, navigate]);
+
   const parseGridPos = (raw: string) => {
     try {
       return JSON.parse(raw) as { x: number; y: number; w: number; h: number };
@@ -105,18 +134,34 @@ export default function DashboardBuilderPage() {
     }
   };
 
-  const handleLayoutChange = async (newLayout: Layout[]) => {
+  // Keep the controlled layout in sync with react-grid-layout. This fires on
+  // mount and throughout an interaction, so it must NOT hit the network —
+  // persistence happens once, on drag/resize STOP, in persistLayout().
+  const handleLayoutChange = (newLayout: Layout[]) => {
     setLayout(newLayout);
-    // Persist layout changes for each widget
-    for (const item of newLayout) {
-      const widgetId = Number(item.i);
-      const gridPosition = JSON.stringify({ x: item.x, y: item.y, w: item.w, h: item.h });
-      try {
-        await dashboardsApi.updateWidget(dashboardId!, widgetId, { grid_position: gridPosition });
-      } catch {
-        // non-critical
-      }
-    }
+  };
+
+  // Persist only the widgets whose position actually changed, in parallel.
+  const persistLayout = (newLayout: Layout[]) => {
+    if (!dashboardId) return;
+    const updates = newLayout
+      .map((item) => {
+        const gridPosition = JSON.stringify({ x: item.x, y: item.y, w: item.w, h: item.h });
+        return { id: item.i, gridPosition };
+      })
+      .filter(({ id, gridPosition }) => savedPositionsRef.current[id] !== gridPosition);
+
+    if (updates.length === 0) return;
+
+    updates.forEach(({ id, gridPosition }) => {
+      savedPositionsRef.current[id] = gridPosition;
+      dashboardsApi
+        .updateWidget(dashboardId, Number(id), { grid_position: gridPosition })
+        .catch(() => {
+          // non-critical; drop from the saved cache so a later change retries it
+          delete savedPositionsRef.current[id];
+        });
+    });
   };
 
   const handleSaveName = async () => {
@@ -232,7 +277,7 @@ export default function DashboardBuilderPage() {
       setShowRefineModal(false);
       setRefineInstruction("");
       setAiSummary(result.explanation || "Dashboard updated.");
-      setAiHadDroppedWidgets(Boolean(result.dropped_widgets?.length));
+      setAiDropped(result.dropped_widgets ?? []);
       await loadDashboard();
     } catch (err) {
       const detail =
@@ -317,10 +362,37 @@ export default function DashboardBuilderPage() {
         </button>
       </div>
 
-      {aiSummary && (
-        <div className={`ai-summary-banner${aiHadDroppedWidgets ? " ai-summary-banner-warning" : ""}`}>
-          <span>{aiHadDroppedWidgets ? "⚠️" : "✨"} {aiSummary}</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => setAiSummary(null)}>✕</button>
+      {(aiSummary || aiDropped.length > 0) && (
+        <div className={`ai-summary-banner${aiDropped.length > 0 ? " ai-summary-banner-warning" : ""}`}>
+          <div className="ai-summary-content">
+            {aiSummary && (
+              <span>{aiDropped.length > 0 ? "⚠️" : "✨"} {aiSummary}</span>
+            )}
+            {aiDropped.length > 0 && (
+              <div className="ai-dropped-list">
+                <div className="ai-dropped-title">
+                  {aiDropped.length} widget{aiDropped.length !== 1 ? "s" : ""} couldn't be built —
+                  here's why:
+                </div>
+                <ul>
+                  {aiDropped.map((d, i) => (
+                    <li key={i}>
+                      <strong>{d.title}</strong> — {d.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              setAiSummary(null);
+              setAiDropped([]);
+            }}
+          >
+            ✕
+          </button>
         </div>
       )}
 
@@ -343,6 +415,8 @@ export default function DashboardBuilderPage() {
             rowHeight={80}
             width={1200}
             onLayoutChange={handleLayoutChange}
+            onDragStop={persistLayout}
+            onResizeStop={persistLayout}
             draggableHandle=".widget-drag-handle"
             resizeHandles={["se"]}
           >

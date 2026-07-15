@@ -16,6 +16,13 @@ volumes:
   query-service-gomod-cache:
 
 services:
+  # One-shot schema migrator — reuse the ai-engine dev image (which has alembic
+  # installed) and bind-mount the source so migration files are live.
+  db-migrate:
+    image: fap-ai-engine:dev
+    volumes: !override
+      - ./ai-engine:/app
+
   # Each dev service below gets its own `image:` tag distinct from the prod
   # compose file's default (<project>-<service>). Without this, `docker
   # compose build`/`up --build` here overwrites the SAME image tag the plain

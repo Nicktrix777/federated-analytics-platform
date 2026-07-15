@@ -56,7 +56,10 @@ function widgetLabel(d: AIProgressEventData): { label: string; warning: boolean 
     case "ok":
       return { label: `Widget '${title}' verified`, warning: false };
     case "dropped":
-      return { label: `Widget '${title}' dropped`, warning: true };
+      return {
+        label: `Widget '${title}' dropped${d.detail ? `: ${d.detail}` : ""}`,
+        warning: true,
+      };
     default:
       return { label: `Widget '${title}': ${d.status ?? "update"}`, warning: false };
   }

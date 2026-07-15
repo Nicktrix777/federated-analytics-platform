@@ -17,7 +17,11 @@ services:
   # Stores: dataset registry, data_sources, dashboards, audit logs
   # ──────────────────────────────────────────────
   postgres-meta:
-    image: postgres:16-alpine
+    # pgvector image (superset of postgres:16) — needed for schema-RAG
+    # embeddings (dataset_embeddings.embedding vector column). The schema is
+    # created and versioned by the db-migrate service (Alembic), NOT by a
+    # docker-entrypoint init script, so this starts as an empty database.
+    image: pgvector/pgvector:pg16
     container_name: fap-postgres-meta
     environment:
       POSTGRES_DB: analytics_meta
@@ -27,7 +31,6 @@ services:
       - "5434:5432"
     volumes:
       - postgres-meta-data:/var/lib/postgresql/data
-      - ./init/postgres-meta-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - federation-net
     healthcheck:
@@ -35,6 +38,31 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ──────────────────────────────────────────────
+  # DB MIGRATE (one-shot) — applies the postgres-meta schema via Alembic.
+  # Single source of truth for the schema (replaced the init SQL + migrate.sh
+  # + numbered migrations). Runs `alembic upgrade head` and exits; core-api and
+  # ai-engine wait for it to complete before starting.
+  # ──────────────────────────────────────────────
+  db-migrate:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    container_name: fap-db-migrate
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      POSTGRES_META_HOST: postgres-meta
+      POSTGRES_META_PORT: 5432
+      POSTGRES_META_DB: analytics_meta
+      POSTGRES_META_USER: meta_user
+      POSTGRES_META_PASSWORD: meta_pass_2024
+    networks:
+      - federation-net
+    restart: "no"
+    depends_on:
+      postgres-meta:
+        condition: service_healthy
 
   # ──────────────────────────────────────────────
   # SOURCE DATABASE — PostgreSQL
@@ -173,6 +201,8 @@ services:
     networks:
       - federation-net
     depends_on:
+      db-migrate:
+        condition: service_completed_successfully
       postgres-meta:
         condition: service_healthy
       trino:
@@ -241,6 +271,8 @@ services:
     networks:
       - federation-net
     depends_on:
+      db-migrate:
+        condition: service_completed_successfully
       postgres-meta:
         condition: service_healthy
       ai-engine:

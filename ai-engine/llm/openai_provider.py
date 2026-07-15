@@ -145,6 +145,22 @@ class OpenAIProvider:
                 f"OpenAI batch widget response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
             )
 
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        """Embed a batch of texts with the given OpenAI embeddings model.
+
+        Returns one vector (list[float]) per input text, in order. Used by the
+        schema-RAG index (dataset text → vector) and per-question retrieval
+        (question → vector). Batched in one request — the embeddings endpoint
+        accepts a list of inputs, so a full-catalog reindex is a single call.
+        """
+        if not texts:
+            return []
+        logger.info(f"Embedding {len(texts)} text(s) with {model}")
+        response = await self.client.embeddings.create(model=model, input=texts)
+        # data is returned in request order, but sort by index defensively.
+        ordered = sorted(response.data, key=lambda d: d.index)
+        return [d.embedding for d in ordered]
+
     async def generate_json(self, system_prompt: str, user_prompt: str, max_tokens: int = 4000) -> dict:
         """
         Generic JSON-mode completion.

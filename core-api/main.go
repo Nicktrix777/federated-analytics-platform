@@ -45,6 +45,7 @@ func main() {
 		db, cfg.TrinoHost, cfg.TrinoPort, aiClient,
 	)
 	dashboardSvc := services.NewDashboardService(db)
+	conversationSvc := services.NewConversationService(db)
 
 	// ── Catalog Auto-Sync ────────────────────────────
 	// Discovers new Trino catalogs/tables (e.g. a freshly added Elasticsearch
@@ -54,7 +55,7 @@ func main() {
 	go runCatalogSyncLoop(dataSourceSvc, cfg.CatalogSyncIntervalSeconds)
 
 	// ── Handlers ────────────────────────────────────
-	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, cfg.AIEnabled)
+	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, conversationSvc, cfg.AIEnabled)
 	healthHandler := handlers.NewHealthHandler(cfg.AIEnabled)
 	historyHandler := handlers.NewHistoryHandler(db)
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)

@@ -87,11 +87,17 @@ export default function DashboardsListPage() {
           | AIDashboardResponse
           | Dashboard
           | undefined;
-        const dashboardId =
-          (payload as AIDashboardResponse)?.dashboard?.id ??
-          (payload as Dashboard)?.id;
+        const aiResp = payload as AIDashboardResponse;
+        const dashboardId = aiResp?.dashboard?.id ?? (payload as Dashboard)?.id;
         if (dashboardId) {
-          navigate(`/dashboards/${dashboardId}`);
+          // Carry the AI summary + dropped-widget errors to the builder so a
+          // partial result isn't presented as a clean success.
+          navigate(`/dashboards/${dashboardId}`, {
+            state: {
+              aiSummary: aiResp?.explanation,
+              droppedWidgets: aiResp?.dropped_widgets ?? undefined,
+            },
+          });
         } else {
           setAiError("Dashboard generation returned an unexpected response.");
         }
@@ -102,7 +108,12 @@ export default function DashboardsListPage() {
       }
 
       const result = await dashboardsApi.generate(aiPrompt);
-      navigate(`/dashboards/${result.dashboard.id}`);
+      navigate(`/dashboards/${result.dashboard.id}`, {
+        state: {
+          aiSummary: result.explanation,
+          droppedWidgets: result.dropped_widgets ?? undefined,
+        },
+      });
     } catch (err) {
       const detail =
         (err as { response?: { data?: { error?: string; details?: string } } })

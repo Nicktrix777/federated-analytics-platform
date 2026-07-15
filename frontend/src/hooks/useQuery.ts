@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { api } from "../api/client";
 import { streamAIOperation, SSEConnectionError } from "../api/sse";
 import type {
@@ -28,6 +28,12 @@ export function useQuery() {
     progress: [],
   });
 
+  // One conversation id per hook instance so follow-up questions ("now break
+  // that down by region") carry prior turns as context. newConversation()
+  // starts a fresh thread. crypto.randomUUID is available in all modern
+  // browsers (and the localhost/https origins this app runs on).
+  const conversationIdRef = useRef<string>(crypto.randomUUID());
+
   const loadHistory = useCallback(async () => {
     try {
       const history = await api.getHistory(30);
@@ -54,7 +60,7 @@ export function useQuery() {
         try {
           const terminal = await streamAIOperation(
             "/api/query/stream",
-            { question, mode },
+            { question, mode, conversation_id: conversationIdRef.current },
             ["result"],
             (type, data) => {
               setState((prev) => ({
@@ -108,7 +114,7 @@ export function useQuery() {
       }
 
       try {
-        const result = await api.query(question, mode);
+        const result = await api.query(question, mode, conversationIdRef.current);
         setState((prev) => ({
           ...prev,
           status: "success",
@@ -157,10 +163,18 @@ export function useQuery() {
     }));
   }, []);
 
+  // Start a fresh conversation thread (drops prior-turn context) and clear the
+  // current result/progress.
+  const newConversation = useCallback(() => {
+    conversationIdRef.current = crypto.randomUUID();
+    reset();
+  }, [reset]);
+
   return {
     ...state,
     executeQuery,
     loadHistory,
     reset,
+    newConversation,
   };
 }

@@ -300,6 +300,7 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 		return nil, fmt.Errorf("failed to list data sources: %w", err)
 	}
 
+	columnsRefreshed := 0
 	for _, ds := range sources {
 		schema, _, err := s.fetchSchemaFromTrino(ds.TrinoCatalog)
 		if err != nil {
@@ -314,12 +315,13 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 			log.Printf("catalog sync: failed to cache schema for %s: %v", ds.TrinoCatalog, err)
 		}
 
-		newDatasets, err := s.syncDatasetsForCatalog(ds.TrinoCatalog, ds.SourceType, schema)
+		newDatasets, changed, err := s.syncDatasetsForCatalog(ds.TrinoCatalog, ds.SourceType, schema)
 		if err != nil {
 			log.Printf("catalog sync: dataset sync failed for %s: %v", ds.TrinoCatalog, err)
 			continue
 		}
 		result.NewDatasets = append(result.NewDatasets, newDatasets...)
+		columnsRefreshed += changed
 	}
 
 	// Derive cross-table join hints from the freshly-synced schema. This is
@@ -332,13 +334,13 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 	}
 	result.InferredRelationships = inferred
 
-	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 || inferred > 0 {
+	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 || inferred > 0 || columnsRefreshed > 0 {
 		s.aiClient.InvalidateCache()
 	}
 
 	result.Message = fmt.Sprintf(
-		"Sync complete: %d new source(s), %d new dataset(s), %d inferred relationship(s)",
-		len(result.NewSources), len(result.NewDatasets), inferred,
+		"Sync complete: %d new source(s), %d new dataset(s), %d column(s) refreshed, %d inferred relationship(s)",
+		len(result.NewSources), len(result.NewDatasets), columnsRefreshed, inferred,
 	)
 	return result, nil
 }
@@ -587,13 +589,14 @@ func (s *DataSourceService) discoverTrinoCatalogs() (map[string]string, error) {
 // invisible.
 func (s *DataSourceService) syncDatasetsForCatalog(
 	catalog, sourceType string, schema map[string]interface{},
-) ([]string, error) {
+) ([]string, int, error) {
 	tables, ok := schema["tables"].(map[string]map[string]interface{})
 	if !ok {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	var added []string
+	columnsChanged := 0
 	for trinoPath, tbl := range tables {
 		parts := strings.SplitN(trinoPath, ".", 3)
 		if len(parts) != 3 {
@@ -601,58 +604,128 @@ func (s *DataSourceService) syncDatasetsForCatalog(
 		}
 		tSchema, tTable := parts[1], parts[2]
 
-		var exists bool
-		if err := s.db.QueryRow(`
-			SELECT EXISTS(
-				SELECT 1 FROM datasets
-				WHERE trino_catalog = $1 AND trino_schema = $2 AND trino_table = $3
-			)
-		`, catalog, tSchema, tTable).Scan(&exists); err != nil {
-			return added, fmt.Errorf("failed to check dataset existence for %s: %w", trinoPath, err)
-		}
-		if exists {
-			continue
-		}
-
-		name := tTable
-		var nameTaken bool
-		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM datasets WHERE name = $1)`, name).
-			Scan(&nameTaken); err != nil {
-			return added, fmt.Errorf("failed to check dataset name for %s: %w", trinoPath, err)
-		}
-		if nameTaken {
-			name = fmt.Sprintf("%s.%s", catalog, tTable)
-		}
-
+		// Look up the existing dataset for this Trino table, if any.
 		var datasetID int
 		err := s.db.QueryRow(`
-			INSERT INTO datasets (name, description, source_type, trino_catalog, trino_schema, trino_table)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id
-		`, name,
-			"Auto-discovered from Trino — add a curated description via the Data Sources UI for richer AI context.",
-			sourceType, catalog, tSchema, tTable,
-		).Scan(&datasetID)
-		if err != nil {
-			return added, fmt.Errorf("failed to insert dataset for %s: %w", trinoPath, err)
+			SELECT id FROM datasets
+			WHERE trino_catalog = $1 AND trino_schema = $2 AND trino_table = $3
+		`, catalog, tSchema, tTable).Scan(&datasetID)
+
+		switch {
+		case err == sql.ErrNoRows:
+			// New table — register it with a placeholder description.
+			name := tTable
+			var nameTaken bool
+			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM datasets WHERE name = $1)`, name).
+				Scan(&nameTaken); err != nil {
+				return added, columnsChanged, fmt.Errorf("failed to check dataset name for %s: %w", trinoPath, err)
+			}
+			if nameTaken {
+				name = fmt.Sprintf("%s.%s", catalog, tTable)
+			}
+			if err := s.db.QueryRow(`
+				INSERT INTO datasets (name, description, source_type, trino_catalog, trino_schema, trino_table)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				RETURNING id
+			`, name,
+				"Auto-discovered from Trino — add a curated description via the Data Sources UI for richer AI context.",
+				sourceType, catalog, tSchema, tTable,
+			).Scan(&datasetID); err != nil {
+				return added, columnsChanged, fmt.Errorf("failed to insert dataset for %s: %w", trinoPath, err)
+			}
+			added = append(added, name)
+		case err != nil:
+			return added, columnsChanged, fmt.Errorf("failed to look up dataset for %s: %w", trinoPath, err)
 		}
 
+		// Reconcile columns against Trino's live view for BOTH new and existing
+		// datasets. Refreshing existing datasets is what keeps nested
+		// ROW/ARRAY(ROW) types accurate when a source's shape changes — existing
+		// datasets used to be skipped wholesale, which is how the metadata drifted
+		// out of sync with Trino (e.g. arrays flattened to plain rows, so the AI
+		// dot-accessed what was really an array). Curated description/sample_values
+		// are preserved; only data_type / membership are reconciled.
 		cols, _ := tbl["columns"].([]map[string]string)
-		for _, col := range cols {
-			colName := col["name"]
-			isJoinable := strings.HasSuffix(colName, "_id") || colName == "id"
+		changed, err := s.reconcileDatasetColumns(datasetID, cols)
+		if err != nil {
+			log.Printf("catalog sync: failed to reconcile columns for %s: %v", trinoPath, err)
+		}
+		columnsChanged += changed
+	}
+
+	return added, columnsChanged, nil
+}
+
+// reconcileDatasetColumns brings a dataset's dataset_columns rows in line with
+// the live column set Trino reports, WITHOUT clobbering curated metadata:
+//   - a column whose data_type changed is UPDATEd in place (description,
+//     sample_values, is_primary_key are untouched);
+//   - a newly-appeared column is INSERTed;
+//   - a column that no longer exists in the source is DELETEd.
+//
+// Schema-agnostic: it works purely off (name, type) pairs, so any source —
+// nested Elasticsearch documents, Mongo, relational — reconciles the same way.
+// Returns the number of columns added/updated/removed.
+func (s *DataSourceService) reconcileDatasetColumns(datasetID int, cols []map[string]string) (int, error) {
+	rows, err := s.db.Query(`SELECT column_name, data_type FROM dataset_columns WHERE dataset_id = $1`, datasetID)
+	if err != nil {
+		return 0, err
+	}
+	current := map[string]string{}
+	for rows.Next() {
+		var name, dtype string
+		if err := rows.Scan(&name, &dtype); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		current[name] = dtype
+	}
+	rows.Close()
+
+	changed := 0
+	live := map[string]bool{}
+	for _, col := range cols {
+		name := col["name"]
+		if name == "" {
+			continue
+		}
+		live[name] = true
+		dtype := col["type"]
+		existingType, ok := current[name]
+		if !ok {
+			isJoinable := strings.HasSuffix(name, "_id") || name == "id"
 			if _, err := s.db.Exec(`
 				INSERT INTO dataset_columns (dataset_id, column_name, data_type, is_joinable)
 				VALUES ($1, $2, $3, $4)
-			`, datasetID, colName, col["type"], isJoinable); err != nil {
-				log.Printf("catalog sync: failed to insert column %s.%s: %v", trinoPath, colName, err)
+			`, datasetID, name, dtype, isJoinable); err != nil {
+				log.Printf("catalog sync: failed to insert column %d.%s: %v", datasetID, name, err)
+				continue
 			}
+			changed++
+		} else if existingType != dtype {
+			if _, err := s.db.Exec(`
+				UPDATE dataset_columns SET data_type = $1 WHERE dataset_id = $2 AND column_name = $3
+			`, dtype, datasetID, name); err != nil {
+				log.Printf("catalog sync: failed to refresh column %d.%s: %v", datasetID, name, err)
+				continue
+			}
+			changed++
 		}
-
-		added = append(added, name)
 	}
 
-	return added, nil
+	// Prune columns Trino no longer reports (dropped/renamed fields).
+	for name := range current {
+		if !live[name] {
+			if _, err := s.db.Exec(
+				`DELETE FROM dataset_columns WHERE dataset_id = $1 AND column_name = $2`, datasetID, name,
+			); err != nil {
+				log.Printf("catalog sync: failed to prune column %d.%s: %v", datasetID, name, err)
+				continue
+			}
+			changed++
+		}
+	}
+	return changed, nil
 }
 
 // fetchSchemaFromTrino queries Trino's information_schema for a catalog.

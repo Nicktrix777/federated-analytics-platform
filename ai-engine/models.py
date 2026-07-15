@@ -37,6 +37,10 @@ class DatasetMeta(BaseModel):
 class PlanRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     datasets: List[DatasetMeta] = []
+    # Pre-rendered prior turns of the same conversation (Core API builds this
+    # from conversation_turns). Present only for multi-turn follow-ups; injected
+    # into the planner prompt so references like "break that down" resolve.
+    conversation_context: Optional[str] = Field(default=None, max_length=8000)
 
 
 # ──────────────────────────────────────────────────────────────

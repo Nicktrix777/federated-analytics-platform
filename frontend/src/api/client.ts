@@ -33,11 +33,12 @@ const client = axios.create({
 export const api = {
   query: async (
     question: string,
-    mode: "ai" | "sql"
+    mode: "ai" | "sql",
+    conversationId?: string
   ): Promise<QueryResponse> => {
     const response = await client.post<QueryResponse>(
       "/api/query",
-      { question, mode },
+      { question, mode, conversation_id: conversationId },
       // The core-api waits up to 5 minutes for the AI engine in AI mode —
       // the 120s instance default would abort the request too early.
       { timeout: mode === "ai" ? 300000 : undefined }

@@ -93,48 +93,53 @@ confidence instead of guessing.
 - Use DENSE_RANK() for "top N per group" patterns
 - Pattern: WITH ranked AS (SELECT ..., DENSE_RANK() OVER (...) AS rank) SELECT ... WHERE rank <= N
 
-### Array/Nested Fields
-- MongoDB/ES arrays of scalars: Use contains(array_col, 'value')  NOT ARRAY_CONTAINS
-- Elasticsearch nested scalar fields (no array involved): dot notation 'parent.child'
+### Nested Fields — ROW (struct) vs ARRAY(ROW) (MANDATORY)
+The schema context lists nested columns as explicit access paths (e.g.
+`details.status (varchar)`) and, for arrays, an UNNEST recipe — NOT as an opaque
+type blob. Use them exactly as shown. Two shapes, two different accesses:
 
-### Unnesting Elasticsearch Arrays of Objects (MANDATORY)
-When the schema context shows a column's type as `array(row(field1 type1, field2
-type2, ...))`, that column holds an array of objects (e.g. an ES "nested" field
-like multiple line-items on one order, multiple attachments on one record).
-To read into it you MUST `CROSS JOIN UNNEST(column)` — but Trino requires you
-to list ONE alias per field of the row, in the exact order the schema shows
-them, not a single alias for the whole object. Supplying fewer aliases fails
-with "Column alias list has N entries but 't' has M columns available".
+- ROW (struct): reference sub-fields with dot notation copied verbatim from the
+  paths shown, e.g. `transactions.kind`, `agencyName.en`. NEVER UNNEST a ROW —
+  that fails with "Cannot unnest type: row(...)".
+- ARRAY(ROW): a repeated/nested object. Read it ONLY with `CROSS JOIN UNNEST`
+  in the FROM clause (see below), then reference the unnested alias's fields.
+  Dot-accessing an array directly fails with "Expression <col> is not of type ROW".
 
-The safe pattern: copy the field names straight from the schema context's type
-string, in order, and reuse them verbatim as your aliases — then you can
-immediately reference the one(s) you need by their original name. If one of
-those fields is itself `array(row(...))`, unnest it again the same way in a
-second CROSS JOIN.
+Do NOT infer the shape from the column name: a plural-sounding column
+(transactions, payments) is often a single ROW, and a singular one can be an
+ARRAY(ROW). Trust ONLY the type/paths in the schema context. If a path you need
+isn't listed, say so and lower confidence — never guess a nested path.
 
-Illustrative example (use the ACTUAL index and field names from YOUR schema
-context — the names below are placeholders to show the mechanics only). Say the
-schema context lists an index whose type is:
-  line_items: array(row(sku varchar, qty integer, components array(row(
-    part_id varchar, part_name varchar, quantity integer))))
+- Arrays of SCALARS: filter with contains(array_col, 'value')  NOT ARRAY_CONTAINS.
 
-To count components grouped by part_name you unnest BOTH levels, listing every
-field of each row() in order as aliases:
+### Unnesting Arrays of Objects — ARRAY(ROW) (MANDATORY)
+`UNNEST` is ONLY valid in the FROM clause via `CROSS JOIN UNNEST(...)`. NEVER put
+UNNEST in the SELECT list or inside a scalar expression — Trino rejects it with
+"mismatched input 'UNNEST'".
+
+To read an `array(row(...))` column, `CROSS JOIN UNNEST(column) AS t` and then
+reference its fields BY NAME — `t.<field>`. Trino names the unnested columns
+after the row's fields, so you do NOT need to list them in the alias (listing a
+wrong number is what causes "Column alias list has N entries but 't' has M
+columns available"). If one of those fields is itself an `array(row(...))`,
+unnest it again in a second CROSS JOIN.
+
+Illustrative example (use the ACTUAL index/field names from YOUR schema context;
+names below only show the mechanics). To find the share of current rentals whose
+driver nationality is 'IND', where `details` is `array(row(... isCurrent boolean,
+drivers array(row(... nationality varchar ...)) ...))`:
 ```sql
-SELECT c.part_name AS part_name, COUNT(*) AS component_count
+SELECT CAST(COUNT(*) FILTER (WHERE dr.nationality = 'IND') AS DOUBLE)
+       * 100.0 / NULLIF(COUNT(*), 0) AS pct
 FROM <the exact quoted index path shown in your schema context>
-CROSS JOIN UNNEST(line_items) AS li(sku, qty, components)
-CROSS JOIN UNNEST(components) AS c(part_id, part_name, quantity)
-GROUP BY c.part_name
-ORDER BY component_count DESC
+CROSS JOIN UNNEST(details) AS d       -- reference d.isCurrent, d.drivers, ...
+CROSS JOIN UNNEST(d.drivers) AS dr     -- reference dr.nationality, ...
+WHERE d.isCurrent = true
 ```
-Every field of `line_items`'s row (sku, qty, components) is listed even though
-only `components` is used, and every field of `components`'s row is listed even
-though only `part_name` is used. Never drop fields from the middle of the alias
-list to save typing, and never rename a field other than the one(s) you are
-actually selecting/grouping on — either breaks the positional match to the
-schema's row layout. If a field name starts with a special character (e.g.
-"@timestamp"), quote it in the alias list.
+Match filter VALUES to the data, not to the phrasing of the question — a
+"nationality" may be stored as a code like 'IND' rather than 'Indian'; use the
+sample values in the schema context when given. If a field name starts with a
+special character (e.g. "@timestamp"), quote it: `d."@timestamp"`.
 
 ### Aggregations
 - Always include LIMIT for non-aggregated queries

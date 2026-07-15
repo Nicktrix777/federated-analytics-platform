@@ -91,6 +91,46 @@ class Settings(BaseSettings):
         description="TTL for Trino/postgres-meta lookups used by agent tools (schema-analyst, etc.)",
     )
 
+    # ── Schema RAG (pgvector) ────────────────────────────────
+    # Retrieve only the datasets relevant to a question (semantic similarity
+    # over dataset embeddings) instead of prompting with the full catalog the
+    # Core API sends. Degrades gracefully: if embeddings are missing/empty the
+    # pipeline falls back to using every dataset it was given, so a fresh
+    # deployment behaves exactly as before until the first reindex runs.
+    schema_rag_enabled: bool = Field(
+        default=True,
+        description="Filter the prompt schema context to the datasets most relevant to the question (pgvector)",
+    )
+    embedding_model: str = Field(
+        default="text-embedding-3-small",
+        description="OpenAI embeddings model for dataset/question vectors",
+    )
+    embedding_dim: int = Field(
+        default=1536,
+        description="Embedding dimensionality — MUST match dataset_embeddings.embedding vector(N)",
+    )
+    schema_rag_top_k: int = Field(
+        default=8,
+        description="Max datasets retrieved per question before falling back to the full catalog",
+    )
+
+    # ── Semantic few-shots (Phase 2) ─────────────────────────
+    # Retrieve the few-shot query examples most SIMILAR to the question (pgvector
+    # over past successful AI queries) instead of the most RECENT. Falls back to
+    # recency when the example index is empty/unavailable.
+    few_shot_rag_enabled: bool = Field(
+        default=True,
+        description="Pick few-shot examples by semantic similarity to the question, not recency",
+    )
+    few_shot_top_k: int = Field(
+        default=5,
+        description="Number of similar past queries injected as few-shot examples",
+    )
+    few_shot_reindex_limit: int = Field(
+        default=200,
+        description="Max unindexed successful queries embedded per examples-reindex run (bounds first backfill cost)",
+    )
+
     # ── Model tiering (Phase 4) ───────────────────────────────
     schema_analyst_model: str = Field(
         default="openai:gpt-4o-mini",

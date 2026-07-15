@@ -78,8 +78,14 @@ dataset names, Trino paths, and columns there.
   delegate to schema-analyst to discover it before continuing.
 
 **Step 2 — SQL Generation (delegate to sql-generator)**
-Provide the schema context (pre-loaded or from schema-analyst) to the sql-generator subagent.
-The generator will produce a complete, Trino-compatible SQL query.
+Provide the schema context to the sql-generator subagent VERBATIM — do NOT summarize or trim it.
+You MUST forward, unchanged:
+  - the exact Trino table paths (with quotes),
+  - the nested-field access paths and CROSS JOIN UNNEST recipes, and
+  - every "Known ... field values" list and per-field sample values ([e.g. ...]) from the context.
+Those sample values are how the generator picks correct filter literals — e.g. that nationality
+is stored as the code 'IND', not the word 'Indian'. If you drop them, the query runs but returns
+wrong/zero results. When unsure how much to pass, pass MORE, not less.
 If the user message contains a "first-pass draft" block (a failed quick attempt with its
 validation issues), pass the draft AND its issues to sql-generator so it can repair the draft
 instead of starting from scratch — unless the draft is clearly the wrong approach.

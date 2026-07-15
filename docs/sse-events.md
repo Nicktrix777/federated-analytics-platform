@@ -25,7 +25,7 @@ Optional `X-Request-ID` header is echoed into every event.
 
 | event | payload fields | meaning |
 |---|---|---|
-| `stage` | `stage`, `detail?` | Pipeline checkpoint. Stages: `fast_path_started`, `fast_path_rejected` (detail = reason), `pipeline_started`, `subagent_started`, `subagent_finished`, `widget_sql_started`, `widget_sql_done`, `validating` |
+| `stage` | `stage`, `detail?` | Pipeline checkpoint. Stages: `schema_retrieval` (detail = "selected N/M datasets by relevance"; emitted when schema-RAG trims the catalog), `fast_path_started`, `fast_path_rejected` (detail = reason), `pipeline_started`, `subagent_started`, `subagent_finished`, `widget_sql_started`, `widget_sql_done`, `validating` |
 | `llm` | `phase` ("start"/"end"), `agent`, `model?`, `duration_ms?`, `input_tokens?`, `output_tokens?` | One LLM call inside the pipeline. `agent` is who made it: `fast-path`, `query-planner`, `dashboard-designer`, `schema-analyst`, `sql-generator` |
 | `tool` | `phase` ("start"/"end"), `tool`, `agent`, `args?`, `duration_ms?` | One agent tool call (schema lookups etc.) |
 | `plan` | `plan` (full QueryPlan JSON), `path` ("fast"/"full") | Terminal success event of `/api/plan/stream` |

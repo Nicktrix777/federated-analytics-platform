@@ -240,8 +240,9 @@ federated-analytics-platform/
 │   └── catalog/
 │       ├── postgres_source.properties
 │       └── mongodb.properties
-└── init/
-    └── postgres-meta-init.sql   # Metadata schema
+└── ai-engine/alembic/       # postgres-meta schema (Alembic migrations)
+    └── versions/
+        └── 0001_baseline_schema.py   # full metadata schema, applied by db-migrate
 ```
 
 ---

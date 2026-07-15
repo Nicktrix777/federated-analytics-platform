@@ -12,6 +12,10 @@ import (
 type QueryRequest struct {
 	Question string `json:"question" binding:"required"`
 	Mode     string `json:"mode" binding:"required,oneof=ai sql"`
+	// ConversationID threads multi-turn context. Optional: a well-formed UUID
+	// (minted by the frontend per chat session) enables follow-up memory;
+	// empty/invalid disables it for this request. AI mode only.
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // ──────────────────────────────────────────────────────────

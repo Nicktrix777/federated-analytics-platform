@@ -16,6 +16,12 @@ metadata helpers and passes them in.
 from typing import List, Optional
 
 from models import DatasetMeta, PlanRequest
+from schema_render import (
+    categorical_values_block,
+    column_sample_suffix,
+    describe_column,
+    parse_samples,
+)
 
 
 def _render_schema_sections(datasets: List[DatasetMeta]) -> str:
@@ -24,23 +30,34 @@ def _render_schema_sections(datasets: List[DatasetMeta]) -> str:
     for ds in datasets:
         col_lines = []
         for col in ds.columns:
-            line = f"  - {col.column_name} ({col.data_type})"
+            # Nested ROW/ARRAY(ROW) columns expand into explicit dotted paths and
+            # UNNEST recipes instead of an opaque type blob the model can't navigate.
+            # Sample values (real stored values) are attached to each leaf.
+            samples = parse_samples(col.sample_values)
+            type_summary, nested = describe_column(
+                col.column_name, col.data_type, samples, max_leaves=20
+            )
+            line = f"  - {col.column_name} ({type_summary})"
             if col.description:
                 line += f": {col.description}"
-            if col.sample_values:
-                line += f" [e.g., {col.sample_values}]"
+            line += column_sample_suffix(col.column_name, samples)
             if col.is_joinable:
                 line += " [JOIN KEY]"
             col_lines.append(line)
+            col_lines.extend(nested)
 
         cols_str = "\n".join(col_lines) if col_lines else "  (no column metadata registered)"
-        schema_sections.append(
+        section = (
             f"### {ds.name}\n"
             f"Description: {ds.description}\n"
             f"Source type: {ds.source_type}\n"
             f"Trino reference: {ds.trino_path}\n"
             f"Columns:\n{cols_str}"
         )
+        vals_block = categorical_values_block((c.column_name, c.sample_values) for c in ds.columns)
+        if vals_block:
+            section += f"\n{vals_block}"
+        schema_sections.append(section)
 
     return "\n\n".join(schema_sections) if schema_sections else "(no datasets registered)"
 
@@ -165,10 +182,18 @@ Your job is to convert natural language questions into structured query plans wi
 
 12. Boolean columns: compare with TRUE/FALSE, not 1/0.
 
-13. Arrays of objects (Elasticsearch "nested" fields, shown in the schema as
-    `array(row(field1 type1, field2 type2, ...))`): read them with CROSS JOIN UNNEST(column),
-    supplying ONE alias per field of the row IN ORDER (copy the field names straight from the
-    schema type string). Supplying fewer aliases fails with "Column alias list has N entries...".
+13. Arrays of objects — ARRAY(ROW): UNNEST is valid ONLY in the FROM clause via
+    `CROSS JOIN UNNEST(column) AS t` — NEVER in the SELECT list or a scalar expression
+    (Trino rejects that with "mismatched input 'UNNEST'"). After unnesting, reference fields
+    by name (`t.<field>`); Trino auto-names the unnested columns after the row's fields, so
+    do not list them (a wrong count fails with "Column alias list has N entries..."). Unnest
+    a nested `array(row(...))` field again in a second CROSS JOIN: `CROSS JOIN UNNEST(t.sub) AS s`.
+
+14. ROW (struct) vs ARRAY(ROW): the schema lists nested columns as explicit paths. A ROW is
+    read with dot notation exactly as shown (e.g. transactions.kind); an ARRAY(ROW) MUST be
+    CROSS JOIN UNNEST-ed (rule 13) before its fields are reachable. Dot-accessing an array
+    fails with "Expression X is not of type ROW"; UNNEST-ing a ROW fails with "Cannot unnest
+    type: row(...)". Never infer the shape from the column name — trust the type/paths shown.
 
 ## Response Format
 
@@ -202,10 +227,18 @@ You MUST respond with a valid JSON object matching this exact schema:
 
 def build_user_prompt(request: PlanRequest) -> str:
     """Build the user message for the fast-path LLM call."""
+    conversation_block = ""
+    if request.conversation_context:
+        conversation_block = (
+            f"\nConversation so far:\n{request.conversation_context}\n"
+            "If the question above is a follow-up, resolve it against these prior turns "
+            "(e.g. reuse/extend the previous query's tables, filters, and grouping). "
+            "If it is self-contained, ignore them.\n"
+        )
     return f"""Convert the following question into a Trino SQL query plan:
 
 Question: {request.question}
-
+{conversation_block}
 Remember:
 - Use fully qualified table names (catalog.schema.table), copied VERBATIM from the "Trino
   reference" shown for each dataset — including any double quotes and the exact schema segment

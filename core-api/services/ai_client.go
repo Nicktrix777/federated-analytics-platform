@@ -36,6 +36,10 @@ func NewAIClient(baseURL string) *AIClient {
 type PlanRequest struct {
 	Question string               `json:"question"`
 	Datasets []models.DatasetMeta `json:"datasets"`
+	// ConversationContext is a pre-rendered block of prior turns in the same
+	// conversation (empty when there's no multi-turn context). The AI Engine
+	// injects it into the planner prompt so follow-ups resolve against history.
+	ConversationContext string `json:"conversation_context,omitempty"`
 }
 
 // DashboardPlanRequest is the payload for AI dashboard generation/refinement.
@@ -47,10 +51,11 @@ type DashboardPlanRequest struct {
 
 // GeneratePlan calls the AI Engine to convert a natural language question
 // into a structured QueryPlan.
-func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.DatasetMeta) (*models.QueryPlan, error) {
+func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.DatasetMeta, conversationContext string) (*models.QueryPlan, error) {
 	reqBody := PlanRequest{
-		Question: question,
-		Datasets: datasets,
+		Question:            question,
+		Datasets:            datasets,
+		ConversationContext: conversationContext,
 	}
 
 	resp, err := postJSON(c.httpClient, c.baseURL+"/api/plan", requestID, reqBody)
@@ -73,11 +78,13 @@ func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.Da
 func (c *AIClient) StreamPlan(
 	requestID, question string,
 	datasets []models.DatasetMeta,
+	conversationContext string,
 	onEvent func(SSEEvent) error,
 ) error {
 	reqBody := PlanRequest{
-		Question: question,
-		Datasets: datasets,
+		Question:            question,
+		Datasets:            datasets,
+		ConversationContext: conversationContext,
 	}
 	return c.streamSSE("/api/plan/stream", requestID, reqBody, onEvent)
 }
