@@ -51,6 +51,7 @@ from config import settings
 from models import (
     DashboardPlan,
     DashboardPlanRequest,
+    DatasetMeta,
     PlanRequest,
     QueryPlan,
     RepairWidgetRequest,
@@ -63,6 +64,7 @@ from agents.tools.validation_tools import validate_and_fix_sql
 from agents.tools._cache import clear_all as clear_tool_cache
 from agents.tools._common import close_shared_clients
 from agents.tools.metadata_tools import (
+    _async_get_datasets,
     _async_get_relationships,
     _async_get_patterns,
 )
@@ -337,6 +339,46 @@ async def _build_extra_context(datasets) -> Optional[str]:
     return "\n\n".join(parts)
 
 
+async def _load_datasets() -> list:
+    """Load the full registered catalog from postgres-meta as DatasetMeta objects.
+
+    The AI Engine is now authoritative for reading metadata: Core API no longer
+    pushes the catalog in the request body, so the pipeline sources it here (from
+    the same TTL-cached postgres-meta read the schema-analyst tool uses). Returns
+    an empty list on failure — the pipeline then reports missing data / low
+    confidence rather than crashing.
+    """
+    try:
+        data = json.loads(await _async_get_datasets())
+    except Exception as e:
+        logger.warning(f"Could not load catalog for planning: {e}")
+        return []
+    if not isinstance(data, list):  # {"error": ...} sentinel from the loader
+        logger.warning(f"Could not load catalog for planning: {data}")
+        return []
+    datasets = []
+    for d in data:
+        try:
+            datasets.append(DatasetMeta(**d))
+        except Exception as e:
+            logger.warning(f"Skipping malformed dataset metadata {d.get('name', '?')}: {e}")
+    return datasets
+
+
+async def _ensure_datasets(request):
+    """Populate request.datasets from postgres-meta when the caller sent none.
+
+    Backward-compatible: if a caller still pushes datasets (e.g. the dashboard
+    flow), they're used as-is; only an empty list triggers the self-load.
+    """
+    if request.datasets:
+        return request
+    datasets = await _load_datasets()
+    if not datasets:
+        return request
+    return request.model_copy(update={"datasets": datasets})
+
+
 async def _select_relevant_datasets(request, question: str, emitter: EventEmitter):
     """Trim the Core API's full catalog to the datasets relevant to the question.
 
@@ -468,6 +510,9 @@ async def _run_plan_pipeline(request: PlanRequest, emitter: EventEmitter) -> Tup
         # Opportunistically fold any newly-succeeded queries into the few-shot
         # index (fire-and-forget, lock-guarded — usually a cheap no-op).
         _spawn_stream_task(_reindex_examples_safe())
+
+        # Source the catalog ourselves (Core API no longer pushes it).
+        request = await _ensure_datasets(request)
 
         # Schema RAG: prompt with only the datasets relevant to the question.
         request = await _select_relevant_datasets(request, request.question, emitter)
@@ -740,6 +785,7 @@ async def repair_widget(request: RepairWidgetRequest) -> RepairWidgetResponse:
             detail="SQL repair unavailable — no OpenAI provider configured (set OPENAI_API_KEY)",
         )
 
+    request = await _ensure_datasets(request)
     schema_context = await _build_extra_context(request.datasets) or "(no schema context provided)"
     user_prompt = (
         f"Widget title: {request.title or '(untitled)'}\n"

@@ -32,10 +32,14 @@ func NewAIClient(baseURL string) *AIClient {
 	}
 }
 
-// PlanRequest is the payload sent to the AI Engine
+// PlanRequest is the payload sent to the AI Engine.
+//
+// Datasets is omitempty: the AI Engine is authoritative for reading the catalog
+// from postgres-meta itself, so the query path no longer pushes it. When nil the
+// field is omitted and the AI Engine self-sources the catalog.
 type PlanRequest struct {
 	Question string               `json:"question"`
-	Datasets []models.DatasetMeta `json:"datasets"`
+	Datasets []models.DatasetMeta `json:"datasets,omitempty"`
 	// ConversationContext is a pre-rendered block of prior turns in the same
 	// conversation (empty when there's no multi-turn context). The AI Engine
 	// injects it into the planner prompt so follow-ups resolve against history.
@@ -183,7 +187,7 @@ type RepairWidgetRequest struct {
 	Error     string               `json:"error"`
 	ChartType string               `json:"chart_type"`
 	Title     string               `json:"title"`
-	Datasets  []models.DatasetMeta `json:"datasets"`
+	Datasets  []models.DatasetMeta `json:"datasets,omitempty"`
 }
 
 type repairWidgetResponse struct {

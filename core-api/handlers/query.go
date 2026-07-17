@@ -109,9 +109,6 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 
 	var plan *models.QueryPlan
 	var sqlToExecute string
-	// Captured in AI mode so a failed query can be re-planned/repaired with the
-	// same schema context.
-	var datasets []models.DatasetMeta
 
 	switch req.Mode {
 	case "ai":
@@ -123,24 +120,13 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 			return
 		}
 
-		// Fetch schema metadata to provide context to the AI Engine
-		var err error
-		datasets, err = h.metadataSvc.GetAllDatasets()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-				Error:   "Failed to fetch metadata",
-				Details: err.Error(),
-			})
-			c.Set(middleware.AuditStatusKey, "error")
-			c.Set(middleware.AuditErrorKey, err.Error())
-			return
-		}
-
 		// Multi-turn: load prior turns so a follow-up resolves against history.
 		convoContext, _ := h.loadConversationContext(req.ConversationID)
 
-		// Call AI Engine — it produces a QueryPlan, never executes anything
-		generatedPlan, err := h.aiClient.GeneratePlan(reqIDStr, req.Question, datasets, convoContext)
+		// Call AI Engine — it produces a QueryPlan, never executes anything. The
+		// AI Engine sources the schema catalog itself from postgres-meta, so we
+		// no longer fetch and push it here.
+		generatedPlan, err := h.aiClient.GeneratePlan(reqIDStr, req.Question, nil, convoContext)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, models.ErrorResponse{
 				Error:   "AI Engine failed to generate query plan",
@@ -202,7 +188,7 @@ func (h *QueryHandler) HandleQuery(c *gin.Context) {
 	var err error
 	if req.Mode == "ai" {
 		var executedSQL string
-		executedSQL, result, err = h.executeWithRepair(reqIDStr, sqlToExecute, datasets, req.Question)
+		executedSQL, result, err = h.executeWithRepair(reqIDStr, sqlToExecute, nil, req.Question)
 		if executedSQL != sqlToExecute {
 			sqlToExecute = executedSQL
 			plan.SQL = executedSQL
@@ -279,17 +265,6 @@ func (h *QueryHandler) HandleQueryStream(c *gin.Context) {
 		return
 	}
 
-	datasets, err := h.metadataSvc.GetAllDatasets()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error:   "Failed to fetch metadata",
-			Details: err.Error(),
-		})
-		c.Set(middleware.AuditStatusKey, "error")
-		c.Set(middleware.AuditErrorKey, err.Error())
-		return
-	}
-
 	reqIDStr := middleware.RequestIDFromContext(c)
 	sse := newSSEStream(c, reqIDStr)
 
@@ -304,7 +279,7 @@ func (h *QueryHandler) HandleQueryStream(c *gin.Context) {
 
 	// Proxy the AI Engine's pipeline events; consume the terminal plan event.
 	terminal, ok := proxyAIStream(sse, "plan", func(onEvent func(services.SSEEvent) error) error {
-		return h.aiClient.StreamPlan(reqIDStr, req.Question, datasets, convoContext, onEvent)
+		return h.aiClient.StreamPlan(reqIDStr, req.Question, nil, convoContext, onEvent)
 	})
 	if !ok {
 		c.Set(middleware.AuditStatusKey, "error")

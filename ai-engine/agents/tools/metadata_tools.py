@@ -53,6 +53,7 @@ async def _async_get_datasets() -> str:
             ds = datasets.get(row["id"])
             if ds is None:
                 ds = datasets[row["id"]] = {
+                    "id": row["id"],
                     "name": row["name"],
                     "description": row["description"] or "",
                     "source_type": row["source_type"],
