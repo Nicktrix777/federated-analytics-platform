@@ -3,20 +3,50 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # Model for the two top-level deep agents only (query planner orchestrator,
-    # dashboard designer). Every other LLM call in this service (fast path,
-    # schema-analyst, sql-generator, widget repair, batched widget SQL) uses
-    # the cheaper *_model settings below — a single dashboard brief can fan
-    # out into a dozen+ calls, and running all of them on the frontier model
-    # is what was blowing through OpenAI's per-minute rate limit.
+    # ── Model-agnostic LLM configuration ─────────────────────
+    # This service is provider-neutral. Two independent mechanisms, both
+    # switchable by env vars alone (no code changes):
+    #
+    #   1. deepagents pipeline (orchestrator, dashboard designer, and the
+    #      schema-analyst / sql-generator subagents) — driven by langchain
+    #      model STRINGS with a provider prefix: `google_genai:gemini-flash-latest`,
+    #      `openai:gpt-4o`, `anthropic:claude-sonnet-5`, `ollama:llama3.1`, etc.
+    #      init_chat_model resolves the right client from the prefix.
+    #
+    #   2. custom single-shot providers (fast path, widget SQL, repair) +
+    #      embeddings — driven by an OpenAI-COMPATIBLE client. Point llm_base_url
+    #      at any OpenAI-compatible endpoint (Gemini, Groq, OpenRouter, Ollama,
+    #      or real OpenAI when blank) and give it llm_api_key.
+    #
+    # Default target: Google Gemini free tier (aistudio.google.com — free key,
+    # no card). The deepagents path uses the native google_genai integration
+    # (GOOGLE_API_KEY); the custom path uses Gemini's OpenAI-compatible endpoint.
+    # Switch providers by editing only the *_model strings + the keys/base_url.
+    #
+    # The cheaper *_model settings exist because a single dashboard brief can fan
+    # out into a dozen+ calls — running all of them on the frontier tier is what
+    # was blowing through per-minute rate limits.
     llm_model: str = Field(
-        default="openai:gpt-4o",
-        description="deepagents model string e.g. 'openai:gpt-4o' or 'anthropic:claude-sonnet-4-6'"
+        default="google_genai:gemini-flash-latest",
+        description="deepagents model string, e.g. 'google_genai:gemini-flash-latest', 'openai:gpt-4o', 'anthropic:claude-sonnet-5'",
     )
 
-    # Still needed for the underlying langchain provider
-    openai_api_key: str = Field(default="", description="OpenAI API key")
-    anthropic_api_key: str = Field(default="", description="Anthropic API key")
+    # Provider API keys. Only the one(s) matching your chosen models need a value.
+    google_api_key: str = Field(default="", description="Google AI Studio (Gemini) key — deepagents google_genai path")
+    anthropic_api_key: str = Field(default="", description="Anthropic API key — deepagents anthropic: path")
+    openai_api_key: str = Field(default="", description="OpenAI API key — deepagents openai: path / real-OpenAI custom providers")
+
+    # Custom OpenAI-compatible provider (fast path, widget SQL, repair, embeddings).
+    # base_url blank → real api.openai.com. For Gemini free tier, set it to
+    # https://generativelanguage.googleapis.com/v1beta/openai/ and use the Gemini key.
+    llm_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        description="OpenAI-compatible base URL for the custom providers + embeddings (blank = real OpenAI)",
+    )
+    llm_api_key: str = Field(
+        default="",
+        description="API key for the OpenAI-compatible custom providers; falls back to google_api_key then openai_api_key",
+    )
 
     # PostgreSQL metadata DB
     postgres_meta_host: str = Field(default="localhost")
@@ -40,12 +70,13 @@ class Settings(BaseSettings):
         description="Try a single-shot LLM call for simple questions before the full deepagents pipeline",
     )
     fast_path_model: str = Field(
-        default="gpt-4o-mini",
+        default="gemini-flash-lite-latest",
         description=(
-            "OpenAI model used for the fast-path single-shot attempt and for "
-            "widget SQL repair. gpt-4o answers ~1s faster on this workload "
-            "(~2s vs ~3s), but gpt-4o-mini has a much higher rate-limit tier "
-            "for the same account — worth the latency to avoid 429s."
+            "Plain model id (NO provider prefix) for the fast-path single-shot "
+            "attempt, sent via the OpenAI-compatible custom provider. Cheap tier "
+            "— high-volume, latency-sensitive. Escalates to the full deepagents "
+            "pipeline when rejected/low-confidence. (e.g. gemini-flash-lite-latest, "
+            "gpt-4o-mini, llama-3.3-70b-versatile)."
         ),
     )
     fast_path_confidence_threshold: float = Field(
@@ -85,10 +116,34 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Clarification depth cap (PR5) ────────────────────────
+    # When the replayed conversation window already contains this many
+    # clarification messages, the pipeline appends a prompt instruction
+    # forcing a best-effort plan instead of yet another question.
+    clarification_depth_cap: int = Field(
+        default=2,
+        description=(
+            "Max clarification messages in the replayed window before forcing "
+            "a best-effort plan. Set higher to allow more back-and-forth."
+        ),
+    )
+
     # ── Schema/metadata tool cache (Phase 1) ─────────────────
     schema_tool_cache_ttl_seconds: float = Field(
         default=60.0,
         description="TTL for Trino/postgres-meta lookups used by agent tools (schema-analyst, etc.)",
+    )
+
+    # ── Metadata-version watcher (Step 1b) ───────────────────
+    # The AI Engine polls metadata_state.version instead of being poked. On a
+    # change it clears the tool caches and re-runs the enrichment pipeline.
+    metadata_version_poll_seconds: float = Field(
+        default=5.0,
+        description="How often the watcher polls metadata_state.version for changes",
+    )
+    enrichment_min_interval_seconds: float = Field(
+        default=30.0,
+        description="Floor between enrichment runs so a burst of metadata writes coalesces into one run",
     )
 
     # ── Schema RAG (pgvector) ────────────────────────────────
@@ -102,8 +157,15 @@ class Settings(BaseSettings):
         description="Filter the prompt schema context to the datasets most relevant to the question (pgvector)",
     )
     embedding_model: str = Field(
-        default="text-embedding-3-small",
-        description="OpenAI embeddings model for dataset/question vectors",
+        default="gemini-embedding-001",
+        description=(
+            "Embeddings model for dataset/question vectors, via the OpenAI-compatible "
+            "custom provider. gemini-embedding-001 supports a configurable output "
+            "dimension, so we request embedding_dim (1536) to match the pgvector "
+            "column without a migration. (OpenAI equivalent: text-embedding-3-small.) "
+            "If the endpoint ignores the dimension request the vectors won't match and "
+            "RAG falls back to the full catalog — the app still works."
+        ),
     )
     embedding_dim: int = Field(
         default=1536,
@@ -133,26 +195,26 @@ class Settings(BaseSettings):
 
     # ── Model tiering (Phase 4) ───────────────────────────────
     schema_analyst_model: str = Field(
-        default="openai:gpt-4o-mini",
-        description="deepagents model string for the schema-analyst subagent (cheap; mostly tool-calling, not reasoning-heavy)",
+        default="google_genai:gemini-flash-lite-latest",
+        description="deepagents model string for the schema-analyst subagent (cheap tier; mostly tool-calling, not reasoning-heavy)",
     )
     sql_generator_model: str = Field(
-        default="openai:gpt-4o",
+        default="google_genai:gemini-flash-latest",
         description=(
             "deepagents model string for the sql-generator subagent (query "
-            "planner's /api/plan full path). Kept on the frontier model — "
+            "planner's /api/plan full path). Kept on the frontier tier — "
             "unlike schema-analyst, this step does real reasoning (e.g. "
             "matching a Trino CROSS JOIN UNNEST alias list to a nested "
-            "Elasticsearch row type), and gpt-4o-mini measurably produced "
+            "Elasticsearch row type), and the cheap tier measurably produced "
             "invalid SQL on deeply-nested array fields."
         ),
     )
     dashboard_widget_sql_model: str = Field(
-        default="gpt-4o",
+        default="gemini-flash-latest",
         description=(
-            "Plain OpenAI model id (not a deepagents string) for the batched "
-            "per-dashboard widget-SQL call and widget-SQL repair — same "
-            "reasoning-quality tradeoff as sql_generator_model above."
+            "Plain model id (NO provider prefix) for the batched per-dashboard "
+            "widget-SQL call and widget-SQL repair, sent via the OpenAI-compatible "
+            "custom provider — same reasoning-quality tradeoff as sql_generator_model."
         ),
     )
 

@@ -3,13 +3,13 @@ import type { AIProgressEvent, AIProgressEventData } from "../types";
 
 // ── AI pipeline progress timeline ─────────────────────────────
 // Renders the SSE progress events of a streaming AI operation
-// (query planning, dashboard generate/refine) as an ordered,
-// live-updating checklist. Reused by the query page and both
-// dashboard modals.
+// (query planning, dashboard/report generate/refine) as an ordered,
+// live-updating checklist. Reused by the query page and the
+// dashboard and report AI modals.
 
 interface TimelineItem {
   key: string;
-  kind: "stage" | "llm" | "tool" | "widget" | "other";
+  kind: "stage" | "llm" | "tool" | "widget" | "sheet" | "other";
   label: string;
   sub?: string;
   /** Still running — resolved by a later event or by the stream ending. */
@@ -33,8 +33,16 @@ const STAGE_LABELS: Record<string, (d: AIProgressEventData) => string> = {
     d.detail ? `Generating SQL — ${d.detail}…` : "Generating SQL…",
   widget_sql_done: (d) =>
     d.detail ? `SQL generated — ${d.detail}` : "SQL generated",
+  sheet_sql_started: (d) =>
+    d.detail ? `Generating SQL — ${d.detail}…` : "Generating SQL…",
+  sheet_sql_done: (d) =>
+    d.detail ? `SQL generated — ${d.detail}` : "SQL generated",
   validating: () => "Validating…",
   executing_sql: () => "Executing SQL…",
+  // PR6: repair loop stages
+  repairing_sql: (d) =>
+    d.detail ? `Repairing SQL — ${d.detail}` : "Repairing SQL…",
+  zero_rows_retry: () => "Retrying with corrected filters…",
 };
 
 /** "some_unknown_stage" → "Some unknown stage…" (forward-compat). */
@@ -62,6 +70,28 @@ function widgetLabel(d: AIProgressEventData): { label: string; warning: boolean 
       };
     default:
       return { label: `Widget '${title}': ${d.status ?? "update"}`, warning: false };
+  }
+}
+
+function sheetLabel(d: AIProgressEventData): { label: string; warning: boolean } {
+  const title = d.title ?? "sheet";
+  switch (d.status) {
+    case "verifying":
+      return { label: `Verifying sheet '${title}'…`, warning: false };
+    case "repairing":
+      return {
+        label: `Repairing sheet '${title}'${d.attempt ? ` (attempt ${d.attempt})` : ""}…`,
+        warning: false,
+      };
+    case "ok":
+      return { label: `Sheet '${title}' verified`, warning: false };
+    case "dropped":
+      return {
+        label: `Sheet '${title}' dropped${d.detail ? `: ${d.detail}` : ""}`,
+        warning: true,
+      };
+    default:
+      return { label: `Sheet '${title}': ${d.status ?? "update"}`, warning: false };
   }
 }
 
@@ -158,6 +188,25 @@ function buildItems(events: AIProgressEvent[]): TimelineItem[] {
         items.push({
           key,
           kind: "widget",
+          label,
+          sub: d.title ?? "",
+          warning,
+          pending: d.status === "verifying" || d.status === "repairing",
+          elapsedMs: d.elapsed_ms,
+        });
+        break;
+      }
+
+      case "sheet": {
+        // A new event for the same sheet resolves its previous in-flight row.
+        const prev = resolveLast(
+          (it) => it.kind === "sheet" && it.sub === (d.title ?? "")
+        );
+        if (prev) prev.pending = false;
+        const { label, warning } = sheetLabel(d);
+        items.push({
+          key,
+          kind: "sheet",
           label,
           sub: d.title ?? "",
           warning,

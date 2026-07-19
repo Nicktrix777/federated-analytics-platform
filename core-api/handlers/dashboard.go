@@ -27,7 +27,6 @@ type DashboardHandler struct {
 	svc         *services.DashboardService
 	aiClient    *services.AIClient
 	queryClient *services.QueryClient
-	metadataSvc *services.MetadataService
 	aiEnabled   bool
 }
 
@@ -35,14 +34,12 @@ func NewDashboardHandler(
 	svc *services.DashboardService,
 	aiClient *services.AIClient,
 	queryClient *services.QueryClient,
-	metadataSvc *services.MetadataService,
 	aiEnabled bool,
 ) *DashboardHandler {
 	return &DashboardHandler{
 		svc:         svc,
 		aiClient:    aiClient,
 		queryClient: queryClient,
-		metadataSvc: metadataSvc,
 		aiEnabled:   aiEnabled,
 	}
 }
@@ -250,9 +247,10 @@ func (h *DashboardHandler) HandleRefineStream(c *gin.Context) {
 	})
 }
 
-// planDashboard runs the shared AI-plan step: fetch metadata, call the AI
-// Engine, and enforce the SQL validation boundary on every proposed widget.
-// On failure it writes the HTTP error response and returns ok=false.
+// planDashboard runs the shared AI-plan step: call the AI Engine (which
+// self-loads the catalog) and enforce the SQL validation boundary on every
+// proposed widget. On failure it writes the HTTP error response and returns
+// ok=false.
 func (h *DashboardHandler) planDashboard(
 	c *gin.Context,
 	prompt string,
@@ -266,16 +264,8 @@ func (h *DashboardHandler) planDashboard(
 		return nil, false
 	}
 
-	datasets, err := h.metadataSvc.GetAllDatasets()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: "Failed to fetch metadata", Details: err.Error(),
-		})
-		return nil, false
-	}
-
 	requestID := middleware.RequestIDFromContext(c)
-	plan, err := h.aiClient.GenerateDashboardPlan(requestID, prompt, datasets, current)
+	plan, err := h.aiClient.GenerateDashboardPlan(requestID, prompt, current)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, models.ErrorResponse{
 			Error: "AI Engine failed to generate dashboard plan", Details: err.Error(),
@@ -283,7 +273,7 @@ func (h *DashboardHandler) planDashboard(
 		return nil, false
 	}
 
-	if err := h.validatePlanWidgets(requestID, plan, datasets, nil); err != nil {
+	if err := h.validatePlanWidgets(requestID, plan, nil); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, models.ErrorResponse{Error: err.Error()})
 		return nil, false
 	}
@@ -296,8 +286,8 @@ func (h *DashboardHandler) planDashboard(
 // `widget` progress events), persist via persist, and emit the terminal
 // `dashboard` event with the same JSON the non-streaming endpoint returns.
 //
-// Failures before the stream opens (AI disabled, metadata fetch) return plain
-// JSON errors; afterwards every failure is a terminal `error` event.
+// Failures before the stream opens (AI disabled) return plain JSON errors;
+// afterwards every failure is a terminal `error` event.
 func (h *DashboardHandler) streamDashboardFlow(
 	c *gin.Context,
 	prompt string,
@@ -312,19 +302,11 @@ func (h *DashboardHandler) streamDashboardFlow(
 		return
 	}
 
-	datasets, err := h.metadataSvc.GetAllDatasets()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, models.ErrorResponse{
-			Error: "Failed to fetch metadata", Details: err.Error(),
-		})
-		return
-	}
-
 	requestID := middleware.RequestIDFromContext(c)
 	sse := newSSEStream(c, requestID)
 
-	terminal, ok := proxyAIStream(sse, "dashboard_plan", func(onEvent func(services.SSEEvent) error) error {
-		return h.aiClient.StreamDashboardPlan(requestID, prompt, datasets, current, onEvent)
+	_, terminal, ok := proxyAIStream(sse, []string{"dashboard_plan"}, func(onEvent func(services.SSEEvent) error) error {
+		return h.aiClient.StreamDashboardPlan(requestID, prompt, current, onEvent)
 	})
 	if !ok {
 		return
@@ -349,7 +331,7 @@ func (h *DashboardHandler) streamDashboardFlow(
 		}
 		sse.emit("widget", payload)
 	}
-	if err := h.validatePlanWidgets(requestID, plan, datasets, progress); err != nil {
+	if err := h.validatePlanWidgets(requestID, plan, progress); err != nil {
 		sse.emitError(err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -386,7 +368,6 @@ type widgetProgress func(title, status string, attempt int, detail string)
 func (h *DashboardHandler) validatePlanWidgets(
 	requestID string,
 	plan *models.DashboardPlan,
-	datasets []models.DatasetMeta,
 	progress widgetProgress,
 ) error {
 	if progress == nil {
@@ -405,7 +386,7 @@ func (h *DashboardHandler) validatePlanWidgets(
 			continue
 		}
 		progress(w.Title, "verifying", 0, "")
-		fixedSQL, err := h.verifyAndRepairWidget(requestID, w, datasets, progress)
+		fixedSQL, err := h.verifyAndRepairWidget(requestID, w, progress)
 		if err != nil {
 			log.Printf("dashboard: dropping widget %q — SQL could not be executed after repair: %v", w.Title, err)
 			reason := "The query didn't run successfully against the data source: " + err.Error()
@@ -446,7 +427,6 @@ func (h *DashboardHandler) validatePlanWidgets(
 func (h *DashboardHandler) verifyAndRepairWidget(
 	requestID string,
 	w models.WidgetPlan,
-	datasets []models.DatasetMeta,
 	progress widgetProgress,
 ) (string, error) {
 	sql := w.SQL
@@ -460,7 +440,7 @@ func (h *DashboardHandler) verifyAndRepairWidget(
 			w.Title, attempt, maxWidgetRepairAttempts, execErr)
 		progress(w.Title, "repairing", attempt, execErr.Error())
 
-		repaired, err := h.aiClient.RepairWidgetSQL(requestID, sql, execErr.Error(), w.ChartType, w.Title, datasets)
+		repaired, err := h.aiClient.RepairWidgetSQL(requestID, sql, execErr.Error(), w.ChartType, w.Title, "error")
 		if err != nil {
 			log.Printf("dashboard: repair call failed for widget %q: %v", w.Title, err)
 			break

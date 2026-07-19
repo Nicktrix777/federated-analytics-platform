@@ -240,16 +240,15 @@ func (s *UploadService) registerMetadata(
 		return -1, err
 	}
 
-	// Insert column metadata with sample values
+	// Insert column metadata (sample_values now handled by the AI Engine profiler
+	// via column_profiles — no need to write them here during upload).
 	for i, h := range headers {
-		samples := collectSamples(rows, i, 3)
 		_, err := s.metaDB.Exec(`
-			INSERT INTO dataset_columns (dataset_id, column_name, data_type, description, is_joinable, sample_values)
-			VALUES ($1, $2, $3, $4, false, $5)
+			INSERT INTO dataset_columns (dataset_id, column_name, data_type, description, is_joinable)
+			VALUES ($1, $2, $3, $4, false)
 		`,
 			datasetID, h, colTypes[i],
 			fmt.Sprintf("Column from uploaded file '%s'", originalFilename),
-			strings.Join(samples, ", "),
 		)
 		if err != nil {
 			return -1, fmt.Errorf("failed to insert column %s: %w", h, err)
@@ -403,22 +402,5 @@ func sanitizeTableName(filename string) string {
 	return sanitizeColName(name)
 }
 
-func collectSamples(rows [][]string, colIdx int, max int) []string {
-	seen := map[string]bool{}
-	var samples []string
-	for _, row := range rows {
-		if len(samples) >= max {
-			break
-		}
-		if colIdx >= len(row) {
-			continue
-		}
-		v := strings.TrimSpace(row[colIdx])
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		samples = append(samples, v)
-	}
-	return samples
-}
+// collectSamples removed — sample values are now sourced by the AI Engine's
+// column profiler (profiler.py) into column_profiles, not written at upload time.

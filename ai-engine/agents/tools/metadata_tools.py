@@ -41,10 +41,15 @@ async def _async_get_datasets() -> str:
                        d.trino_catalog, d.trino_schema, d.trino_table,
                        dc.column_name, dc.data_type,
                        dc.description AS column_description,
-                       dc.is_joinable, dc.sample_values
+                       dc.is_joinable,
+                       dc.semantic_type,
+                       cp.sample_values,
+                       cp.pattern
                 FROM datasets d
                 LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
+                LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
                 WHERE d.is_active = true
+                  AND (dc.id IS NULL OR COALESCE(dc.sensitivity, 'unclassified') <> 'forbidden')
                 ORDER BY d.name, dc.id
             """)
 
@@ -63,13 +68,18 @@ async def _async_get_datasets() -> str:
                     "columns": [],
                 }
             if row["column_name"] is not None:
-                ds["columns"].append({
+                col = {
                     "column_name": row["column_name"],
                     "data_type": row["data_type"],
                     "description": row["column_description"] or "",
                     "is_joinable": row["is_joinable"],
                     "sample_values": row["sample_values"] or "",
-                })
+                }
+                if row["semantic_type"]:
+                    col["semantic_type"] = row["semantic_type"]
+                if row["pattern"]:
+                    col["pattern"] = row["pattern"]
+                ds["columns"].append(col)
 
         return json.dumps(list(datasets.values()), indent=2)
     except Exception as e:
@@ -131,4 +141,32 @@ async def _async_get_patterns() -> str:
         return json.dumps([dict(r) for r in rows], indent=2)
     except Exception as e:
         logger.warning(f"Could not load query patterns: {e}")
+        return json.dumps([])
+
+
+@tool
+async def get_value_lookups() -> str:
+    """
+    Get coded-column lookup bindings from the metadata database.
+    Returns a list of mappings from coded columns to Trino-reachable reference
+    tables so SQL uses a subquery instead of guessing literal values.
+    """
+    return await _async_get_value_lookups()
+
+
+@async_ttl_cache(settings.schema_tool_cache_ttl_seconds)
+async def _async_get_value_lookups() -> str:
+    """Load value_lookups from postgres-meta (TTL-cached)."""
+    try:
+        async with meta_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT column_trino_path, column_name, semantic_type,
+                       lookup_trino_path, key_column, match_columns,
+                       description
+                FROM value_lookups
+                ORDER BY id
+            """)
+        return json.dumps([dict(r) for r in rows], indent=2)
+    except Exception as e:
+        logger.warning(f"Could not load value lookups: {e}")
         return json.dumps([])

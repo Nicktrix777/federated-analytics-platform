@@ -173,22 +173,34 @@ services:
       dockerfile: Dockerfile
     container_name: fap-ai-engine
     environment:
-      LLM_MODEL: ${LLM_MODEL:-openai:gpt-4o}
+      # Provider-agnostic LLM config. Default: Google Gemini free tier.
+      #   - Set GOOGLE_API_KEY (free from aistudio.google.com) and you're done.
+      #   - To use another provider, change the *_MODEL strings + the base_url/key
+      #     below; no code changes needed.
+      LLM_MODEL: ${LLM_MODEL:-google_genai:gemini-flash-latest}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Custom OpenAI-compatible providers (fast path, widget SQL, repair,
+      # embeddings). Default base_url = Gemini's OpenAI-compat layer; LLM_API_KEY
+      # falls back to GOOGLE_API_KEY in code, so a single Gemini key covers both
+      # the deepagents path and the custom path.
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-gemini-embedding-001}
       # Fast path + resilience tuning (documented in .env.example) — must be
       # forwarded here or the container falls back to code defaults.
       FAST_PATH_ENABLED: ${FAST_PATH_ENABLED:-true}
-      FAST_PATH_MODEL: ${FAST_PATH_MODEL:-gpt-4o-mini}
+      FAST_PATH_MODEL: ${FAST_PATH_MODEL:-gemini-flash-lite-latest}
       FAST_PATH_CONFIDENCE_THRESHOLD: ${FAST_PATH_CONFIDENCE_THRESHOLD:-0.55}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-5}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
       AI_MAX_CONCURRENT_PLANS: ${AI_MAX_CONCURRENT_PLANS:-4}
       AI_QUEUE_TIMEOUT_SECONDS: ${AI_QUEUE_TIMEOUT_SECONDS:-45}
       SCHEMA_TOOL_CACHE_TTL_SECONDS: ${SCHEMA_TOOL_CACHE_TTL_SECONDS:-60}
-      SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-openai:gpt-4o-mini}
-      SQL_GENERATOR_MODEL: ${SQL_GENERATOR_MODEL:-openai:gpt-4o}
-      DASHBOARD_WIDGET_SQL_MODEL: ${DASHBOARD_WIDGET_SQL_MODEL:-gpt-4o}
+      SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-google_genai:gemini-flash-lite-latest}
+      SQL_GENERATOR_MODEL: ${SQL_GENERATOR_MODEL:-google_genai:gemini-flash-latest}
+      DASHBOARD_WIDGET_SQL_MODEL: ${DASHBOARD_WIDGET_SQL_MODEL:-gemini-flash-latest}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta

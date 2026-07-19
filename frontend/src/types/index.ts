@@ -41,6 +41,7 @@ export interface SchemaRefreshResult {
 export interface SyncCatalogsResult {
   new_sources: string[];
   new_datasets: string[];
+  inferred_relationships: number;
   message: string;
 }
 
@@ -81,11 +82,18 @@ export interface QueryPlan {
   explanation: string;
 }
 
+export interface Clarification {
+  question: string;
+  options: string[];
+  kind: string;
+}
+
 export interface QueryResponse {
   request_id: string;
   question: string;
   mode: "ai" | "sql";
   plan?: QueryPlan;
+  clarification?: Clarification;
   columns: string[];
   rows: unknown[][];
   row_count: number;
@@ -105,12 +113,55 @@ export interface HistoryEntry {
 }
 
 export type QueryMode = "ai" | "sql";
-export type QueryStatus = "idle" | "loading" | "success" | "error";
+export type QueryStatus = "idle" | "loading" | "success" | "error" | "clarification";
+
+// ── Conversations / Transcript (PR7) ─────────────────────────
+
+// One entry in the sidebar "Chats" list.
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  turn_count: number;
+  created_at: string;
+  last_active_at: string;
+}
+
+// A hydrated turn returned by GET /api/conversations/:id/turns. Result rows are
+// not persisted, so a plan turn only carries sql/row_count/confidence.
+export interface ConversationTurnDTO {
+  id: number;
+  question: string;
+  kind: "plan" | "clarification";
+  sql?: string;
+  row_count: number;
+  confidence?: number;
+  clarification?: Clarification;
+  created_at: string;
+}
+
+// The outcome of a single transcript turn, mirroring the terminal SSE event.
+export type TurnOutcome =
+  | { type: "result"; result: QueryResponse; hydrated?: boolean }
+  | { type: "clarification"; clarification: Clarification; answered: boolean }
+  | { type: "error"; message: string };
+
+// Client-side transcript state — one entry per exchange, mirroring
+// conversation_turns. Each turn owns its own progress events so timelines
+// don't bleed across turns.
+export interface TranscriptTurn {
+  id: string;
+  userText: string;
+  userKind: "question" | "answer";
+  mode: QueryMode;
+  progress: AIProgressEvent[];
+  status: "streaming" | "done" | "error";
+  outcome?: TurnOutcome;
+}
 
 // ── AI streaming progress (SSE) ──────────────────────────────
 // One progress event received on a /stream endpoint. `type` is the SSE
-// event name ("stage" | "llm" | "tool" | "widget" | future types) and
-// `data` its JSON payload — see docs/sse-events.md.
+// event name ("stage" | "llm" | "tool" | "widget" | "sheet" | future
+// types) and `data` its JSON payload — see docs/sse-events.md.
 
 export interface AIProgressEventData {
   stage?: string;
@@ -217,4 +268,78 @@ export interface UpdateWidgetPayload {
   chart_config?: string;
   grid_position?: string;
   refresh_rate_ms?: number;
+}
+
+// ── Reports ──────────────────────────────────────────────────
+
+// Excel column-format vocabulary — shared with the AI engine and the
+// core-api exporter.
+export type ColumnFormat =
+  | "text"
+  | "integer"
+  | "number"
+  | "currency"
+  | "percent"
+  | "date"
+  | "datetime";
+
+export interface ReportSheet {
+  id: number;
+  report_id: number;
+  title: string;
+  description: string;
+  query_sql: string;
+  column_formats: string; // JSON {column_name: ColumnFormat}
+  position: number;
+  max_rows: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Report {
+  id: number;
+  name: string;
+  description: string;
+  is_active: boolean;
+  sheets?: ReportSheet[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateReportPayload {
+  name: string;
+  description?: string;
+}
+
+// A sheet the AI proposed but could not add — its SQL never ran successfully
+// against the data source, even after repair attempts.
+export interface DroppedSheet {
+  title: string;
+  reason: string;
+}
+
+// Response from the AI generate/refine endpoints
+export interface AIReportResponse {
+  report: Report;
+  explanation: string;
+  confidence: number;
+  dropped_sheets: DroppedSheet[] | null;
+}
+
+export interface CreateSheetPayload {
+  title: string;
+  description?: string;
+  query_sql: string;
+  column_formats?: string;
+  position?: number;
+  max_rows?: number;
+}
+
+export interface UpdateSheetPayload {
+  title?: string;
+  description?: string;
+  query_sql?: string;
+  column_formats?: string;
+  position?: number;
+  max_rows?: number;
 }

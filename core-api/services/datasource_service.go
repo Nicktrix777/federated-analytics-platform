@@ -34,15 +34,13 @@ type DataSourceService struct {
 	db        *sql.DB
 	trinoHost string
 	trinoPort string
-	aiClient  *AIClient
 }
 
-func NewDataSourceService(db *sql.DB, trinoHost, trinoPort string, aiClient *AIClient) *DataSourceService {
+func NewDataSourceService(db *sql.DB, trinoHost, trinoPort string) *DataSourceService {
 	return &DataSourceService{
 		db:        db,
 		trinoHost: trinoHost,
 		trinoPort: trinoPort,
-		aiClient:  aiClient,
 	}
 }
 
@@ -233,8 +231,12 @@ func (s *DataSourceService) RefreshSchema(id int) (*models.SchemaRefreshResult, 
 		return nil, fmt.Errorf("failed to cache schema: %w", err)
 	}
 
-	// Invalidate AI Engine cache
-	s.aiClient.InvalidateCache()
+	// RefreshSchema only writes data_sources.schema_cache, which has no bump
+	// trigger (it churns on every ~300s catalog sync). Bump the metadata version
+	// explicitly so the AI Engine's watcher re-enriches within its poll interval.
+	if err := BumpMetadataVersion(s.db); err != nil {
+		log.Printf("RefreshSchema: metadata version bump failed for %s: %v", ds.TrinoCatalog, err)
+	}
 
 	return &models.SchemaRefreshResult{
 		DataSourceID: id,
@@ -251,7 +253,13 @@ func (s *DataSourceService) RefreshSchema(id int) (*models.SchemaRefreshResult, 
 // yet in the curated `datasets` table. This is what lets a newly-added
 // Elasticsearch index show up to the AI without a manual SQL insert.
 func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult, error) {
-	result := &models.SyncCatalogsResult{}
+	// Initialized as empty (not nil) slices so the JSON response always sends
+	// [] rather than null when nothing new is found — a nil slice's zero value
+	// marshals as null, which crashed the frontend's result.new_sources.length.
+	result := &models.SyncCatalogsResult{
+		NewSources:  []string{},
+		NewDatasets: []string{},
+	}
 
 	catalogs, err := s.discoverTrinoCatalogs()
 	if err != nil {
@@ -334,9 +342,10 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 	}
 	result.InferredRelationships = inferred
 
-	if len(result.NewSources) > 0 || len(result.NewDatasets) > 0 || inferred > 0 || columnsRefreshed > 0 {
-		s.aiClient.InvalidateCache()
-	}
+	// No explicit bump needed here: new/changed datasets, columns and
+	// relationships all write tables that carry metadata_state bump triggers
+	// (datasets, dataset_columns, table_relationships), so the version already
+	// moves and the AI Engine's watcher re-enriches on its own.
 
 	result.Message = fmt.Sprintf(
 		"Sync complete: %d new source(s), %d new dataset(s), %d column(s) refreshed, %d inferred relationship(s)",
@@ -643,8 +652,11 @@ func (s *DataSourceService) syncDatasetsForCatalog(
 		// ROW/ARRAY(ROW) types accurate when a source's shape changes — existing
 		// datasets used to be skipped wholesale, which is how the metadata drifted
 		// out of sync with Trino (e.g. arrays flattened to plain rows, so the AI
-		// dot-accessed what was really an array). Curated description/sample_values
-		// are preserved; only data_type / membership are reconciled.
+		// dot-accessed what was really an array). Curated fields (description,
+		// is_primary_key, semantic_type, sensitivity) are preserved; sample values
+		// live in column_profiles with ON DELETE CASCADE, so a column deletion
+		// here structurally cleans up profiles — no special-casing needed.
+		// Only data_type / membership are reconciled.
 		cols, _ := tbl["columns"].([]map[string]string)
 		changed, err := s.reconcileDatasetColumns(datasetID, cols)
 		if err != nil {
@@ -659,9 +671,10 @@ func (s *DataSourceService) syncDatasetsForCatalog(
 // reconcileDatasetColumns brings a dataset's dataset_columns rows in line with
 // the live column set Trino reports, WITHOUT clobbering curated metadata:
 //   - a column whose data_type changed is UPDATEd in place (description,
-//     sample_values, is_primary_key are untouched);
+//     is_primary_key, semantic_type, sensitivity are untouched);
 //   - a newly-appeared column is INSERTed;
-//   - a column that no longer exists in the source is DELETEd.
+//   - a column that no longer exists in the source is DELETEd (and its
+//     column_profiles row is cascade-deleted automatically).
 //
 // Schema-agnostic: it works purely off (name, type) pairs, so any source —
 // nested Elasticsearch documents, Mongo, relational — reconciles the same way.

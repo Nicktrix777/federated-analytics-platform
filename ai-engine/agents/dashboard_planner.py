@@ -135,7 +135,7 @@ data_requirements to what's specific to THAT widget.
 """
 
 
-def create_dashboard_designer(model: str = "openai:gpt-4o") -> object:
+def create_dashboard_designer(model: str = "anthropic:claude-sonnet-5") -> object:
     """Create the dashboard designer deepagent."""
     resolved_model = init_chat_model(
         model,

@@ -23,12 +23,16 @@ def _check_trino_patterns(sql: str) -> list[str]:
     return issues
 
 
-def validate_and_fix_sql(sql: str) -> dict:
+def validate_and_fix_sql(sql: str, default_limit: int = 1000) -> dict:
     """
     Deterministic safety + auto-fix gate for any generated SQL plan.
 
     Both the fast single-shot path and the full deepagents pipeline run
     their output through this before it's returned to the Core API.
+
+    `default_limit` is the LIMIT injected when a non-aggregating query has
+    none — 1000 fits interactive results; the report pipeline passes a higher
+    cap because sheets feed a row-capped Excel export, not a results grid.
 
     Returns:
         {
@@ -85,8 +89,8 @@ def validate_and_fix_sql(sql: str) -> dict:
         kw in fixed_normalized for kw in ("COUNT(", "SUM(", "AVG(", "GROUP BY", "MIN(", "MAX(")
     )
     if "LIMIT" not in fixed_normalized and not is_aggregation:
-        fixed_sql = fixed_sql.rstrip().rstrip(";") + "\nLIMIT 1000"
-        issues.append("INFO: Added default LIMIT 1000 (none was specified)")
+        fixed_sql = fixed_sql.rstrip().rstrip(";") + f"\nLIMIT {default_limit}"
+        issues.append(f"INFO: Added default LIMIT {default_limit} (none was specified)")
 
     confidence_adjustment = -0.1 if any(i.startswith("WARNING") for i in issues) else 0.0
 

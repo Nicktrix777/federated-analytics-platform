@@ -19,6 +19,21 @@ type QueryRequest struct {
 }
 
 // ──────────────────────────────────────────────────────────
+// Chat Message — structured transcript unit (PR4)
+//
+// The Core API assembles these from conversation_turns and sends them to
+// the AI Engine, which renders them into prompt text. The frontend never
+// sends or sees these — it keeps sending {question, mode, conversation_id}.
+// ──────────────────────────────────────────────────────────
+
+type ChatMessage struct {
+	Role    string          `json:"role"`              // "user" | "assistant"
+	Kind    string          `json:"kind"`              // "question" | "answer" | "plan" | "clarification"
+	Content string          `json:"content"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// ──────────────────────────────────────────────────────────
 // Query Plan — produced by AI Engine, consumed by Query Service
 // ──────────────────────────────────────────────────────────
 
@@ -62,11 +77,26 @@ type QueryResponse struct {
 	Question        string          `json:"question"`
 	Mode            string          `json:"mode"`
 	Plan            *QueryPlan      `json:"plan,omitempty"`
+	Clarification   *Clarification  `json:"clarification,omitempty"`
 	Columns         []string        `json:"columns"`
 	Rows            [][]interface{} `json:"rows"`
 	RowCount        int             `json:"row_count"`
 	ExecutionTimeMs int64           `json:"execution_time_ms"`
 	AIEnabled       bool            `json:"ai_enabled"`
+}
+
+// ──────────────────────────────────────────────────────────
+// Clarification (PR5) — alternative terminal outcome
+//
+// The AI Engine returns this instead of a QueryPlan when the question
+// is genuinely ambiguous. The Core API records it as a clarification
+// turn and sends it to the frontend, which renders option buttons.
+// ──────────────────────────────────────────────────────────
+
+type Clarification struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+	Kind     string   `json:"kind"`
 }
 
 // ──────────────────────────────────────────────────────────
@@ -251,8 +281,124 @@ type DashboardPlan struct {
 }
 
 // ──────────────────────────────────────────────────────────
-// Error Response
+// Reports (Excel export)
 // ──────────────────────────────────────────────────────────
+
+type Report struct {
+	ID          int           `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	IsActive    bool          `json:"is_active"`
+	Sheets      []ReportSheet `json:"sheets,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+}
+
+type ReportSheet struct {
+	ID            int       `json:"id"`
+	ReportID      int       `json:"report_id"`
+	Title         string    `json:"title"`
+	Description   string    `json:"description"`
+	QuerySQL      string    `json:"query_sql"`
+	ColumnFormats string    `json:"column_formats"` // JSON {column: text|integer|number|currency|percent|date|datetime}
+	Position      int       `json:"position"`
+	MaxRows       int       `json:"max_rows"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type CreateReportRequest struct {
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description"`
+}
+
+type UpdateReportRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type CreateSheetRequest struct {
+	Title         string `json:"title" binding:"required"`
+	QuerySQL      string `json:"query_sql" binding:"required"`
+	Description   string `json:"description"`
+	ColumnFormats string `json:"column_formats"`
+	Position      int    `json:"position"`
+	MaxRows       int    `json:"max_rows"`
+}
+
+type UpdateSheetRequest struct {
+	Title         string `json:"title"`
+	QuerySQL      string `json:"query_sql"`
+	Description   string `json:"description"`
+	ColumnFormats string `json:"column_formats"`
+	Position      *int   `json:"position"`
+	MaxRows       *int   `json:"max_rows"`
+}
+
+// ──────────────────────────────────────────────────────────
+// AI Report Generation
+// ──────────────────────────────────────────────────────────
+
+type GenerateReportRequest struct {
+	Prompt string `json:"prompt" binding:"required"`
+}
+
+type RefineReportRequest struct {
+	Instruction string `json:"instruction" binding:"required"`
+}
+
+// SheetPlan is one AI-proposed report sheet (SQL not yet persisted or executed).
+type SheetPlan struct {
+	Title         string            `json:"title"`
+	Description   string            `json:"description"`
+	SQL           string            `json:"sql"`
+	ColumnFormats map[string]string `json:"column_formats"`
+	Position      int               `json:"position"`
+}
+
+// DroppedSheet records a sheet the AI proposed that never made it into the
+// report because its SQL could not be executed, even after repair attempts.
+// Same rationale as DroppedWidget.
+type DroppedSheet struct {
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+}
+
+// ReportPlan is the AI Engine's full report proposal. The Core API validates
+// every sheet's SQL before any of it reaches the database.
+type ReportPlan struct {
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	Sheets        []SheetPlan    `json:"sheets"`
+	Confidence    float64        `json:"confidence"`
+	Explanation   string         `json:"explanation"`
+	DroppedSheets []DroppedSheet `json:"dropped_sheets,omitempty"`
+}
+
+// ──────────────────────────────────────────────────────────────
+// Curation Queue (PR6) — items needing operator attention
+//
+// Populated when the query repair loop exhausts all attempts or when
+// a zero-row result cannot be auto-corrected. v1: list-only (no UI,
+// no resolve endpoint — flip status via SQL).
+// ──────────────────────────────────────────────────────────────
+
+type CurationItem struct {
+	ID             int       `json:"id"`
+	Kind           string    `json:"kind"`
+	DatasetID      *int      `json:"dataset_id,omitempty"`
+	ColumnName     string    `json:"column_name,omitempty"`
+	Question       string    `json:"question,omitempty"`
+	Detail         string    `json:"detail,omitempty"`
+	Status         string    `json:"status"`
+	RequestID      string    `json:"request_id,omitempty"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// ──────────────────────────────────────────────────────────────
+// Error Response
+// ──────────────────────────────────────────────────────────────
 
 type ErrorResponse struct {
 	Error   string `json:"error"`

@@ -18,9 +18,10 @@ MongoDB  →  employee_db  (port 27017)
   ├── employee_profiles   rich profiles: skills, certs, education, preferences
   └── _schema             Trino schema definitions for accurate type inference
 
-Metadata  →  analytics_meta / postgres-meta (port 5434)
-  ├── datasets            registry entries for all 5 tables/collections
-  └── dataset_columns     full column descriptions fed into AI Engine prompts
+Does NOT touch analytics_meta / postgres-meta: datasets, dataset_columns and
+table_relationships are discovered live from Trino via Core API's catalog sync
+("Sync Catalogs" in the UI / POST /api/datasources/sync), so this script only
+needs to land rows in the two source databases for that sync to pick up.
 
 CROSS-SOURCE JOIN KEY
 ─────────────────────
@@ -84,14 +85,6 @@ PG_SOURCE_CONFIG: Dict[str, Any] = dict(
     dbname          = os.getenv("PG_DB",        "source_db"),
     user            = os.getenv("PG_USER",      "source_user"),
     password        = os.getenv("PG_PASS",      "source_pass_2024"),
-    connect_timeout = 10,
-)
-PG_META_CONFIG: Dict[str, Any] = dict(
-    host            = os.getenv("PG_META_HOST",      "localhost"),
-    port            = int(os.getenv("PG_META_PORT",  "5434")),
-    dbname          = os.getenv("PG_META_DB",        "analytics_meta"),
-    user            = os.getenv("PG_META_USER",      "meta_user"),
-    password        = os.getenv("PG_META_PASS",      "meta_pass_2024"),
     connect_timeout = 10,
 )
 MONGO_HOST    = os.getenv("MONGO_HOST", "localhost")
@@ -810,239 +803,6 @@ def seed_mongodb(db, employees: List[Dict[str, Any]]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  METADATA REGISTRY  ─  POSTGRES-META (AI ENGINE CONTEXT)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def register_metadata(conn_meta, employees: List[Dict[str, Any]]) -> None:
-    """
-    Register all 5 tables/collections in the analytics_meta database so the
-    AI Engine can build accurate NL→SQL prompts.
-
-    This replaces the placeholder 'orders'/'products' entries and adds the
-    full employee management schema.
-    """
-    cur = conn_meta.cursor()
-
-    print("  [META] Registering dataset metadata …")
-
-    # Sample values derived from actual seeded data
-    dept_names   = ", ".join(d[0] for d in DEPARTMENTS[:4])
-    dept_locs    = "Bangalore, Mumbai, Delhi, Hyderabad"
-    emp_titles   = "Software Engineer, Product Manager, Account Executive"
-    emp_statuses = "active, on_leave, inactive"
-    review_perds = "Q1-2024, Q2-2024, Q3-2024, Q4-2024"
-    task_statuses   = "open, in_progress, completed, blocked"
-    task_priorities = "low, medium, high, critical"
-    projects_sample = ", ".join(PROJECTS[:4])
-
-    first_eid  = employees[0]["employee_id"] if employees else 1
-    sample_ids = f"{first_eid}, {first_eid+1}, {first_eid+2}"
-
-    DATASETS = [
-        {
-            "name":          "departments",
-            "description":   (
-                "Business unit definitions for the company. "
-                "Each department has a location, cost centre, and headcount. "
-                "Use for department-level aggregations and filtering employees by department."
-            ),
-            "source_type":   "postgresql",
-            "trino_catalog": "postgres_source",
-            "trino_schema":  "public",
-            "trino_table":   "departments",
-            "columns": [
-                ("id",          "INTEGER",   "Unique department identifier (primary key)", True,  False, "1, 2, 3"),
-                ("name",        "VARCHAR",   f"Department name — e.g. {dept_names}", False, True,  dept_names),
-                ("cost_center", "VARCHAR",   "Internal cost centre code, e.g. ENG-001, HR-001", False, False, "ENG-001, HR-001, FIN-001"),
-                ("location",    "VARCHAR",   f"Office city for this department: {dept_locs}", False, False, dept_locs),
-                ("description", "VARCHAR",   "Human-readable description of the department's role", False, False, ""),
-                ("headcount",   "INTEGER",   "Number of active employees in this department", False, False, "8, 10, 12"),
-                ("created_at",  "TIMESTAMPTZ","Timestamp when this record was created", False, False, ""),
-            ],
-        },
-        {
-            "name":          "employees",
-            "description":   (
-                "Core HR record for every employee. "
-                "Contains personal info, role, salary, hire date, and reporting line. "
-                "Primary cross-source join key: employee_id links to tasks and employee_profiles in MongoDB."
-            ),
-            "source_type":   "postgresql",
-            "trino_catalog": "postgres_source",
-            "trino_schema":  "public",
-            "trino_table":   "employees",
-            "columns": [
-                ("employee_id",   "INTEGER",   "Unique employee identifier (primary key). JOIN KEY to MongoDB tasks and profiles.", True,  True,  sample_ids),
-                ("first_name",    "VARCHAR",   "Employee's first name",                          False, False, "Priya, Arjun, Sunita"),
-                ("last_name",     "VARCHAR",   "Employee's last name",                           False, False, "Sharma, Iyer, Mehta"),
-                ("email",         "VARCHAR",   "Corporate email address",                        False, False, "priya.sharma@acme-corp.in"),
-                ("department_id", "INTEGER",   "Foreign key to departments.id",                  False, True,  "1, 2, 3"),
-                ("department",    "VARCHAR",   f"Denormalised department name for easy filtering: {dept_names}", False, True, dept_names),
-                ("job_title",     "VARCHAR",   f"Employee's job title: {emp_titles}", False, False, emp_titles),
-                ("hire_date",     "DATE",      "Date the employee joined the company (range: 2019–2024)", False, False, "2021-06-01, 2022-11-15"),
-                ("salary",        "NUMERIC",   "Annual salary in INR (₹)",                        False, False, "800000, 1500000, 2800000"),
-                ("status",        "VARCHAR",   f"Employment status: {emp_statuses}",              False, False, emp_statuses),
-                ("manager_id",    "INTEGER",   "employee_id of this employee's direct manager (NULL for department heads)", False, True, ""),
-                ("phone",         "VARCHAR",   "Employee phone number",                           False, False, ""),
-                ("location",      "VARCHAR",   f"Office city: {dept_locs}",                       False, False, dept_locs),
-            ],
-        },
-        {
-            "name":          "performance_reviews",
-            "description":   (
-                "Quarterly performance review scores for each employee. "
-                "Each employee has 2 reviews. Score is 1.0–5.0. "
-                "Use to identify high performers, team-level trends, or goal completion rates."
-            ),
-            "source_type":   "postgresql",
-            "trino_catalog": "postgres_source",
-            "trino_schema":  "public",
-            "trino_table":   "performance_reviews",
-            "columns": [
-                ("review_id",        "INTEGER",   "Unique review identifier",                        True,  False, ""),
-                ("employee_id",      "INTEGER",   "FK to employees.employee_id",                     False, True,  sample_ids),
-                ("reviewer_id",      "INTEGER",   "employee_id of the reviewer (usually the manager)", False, True, ""),
-                ("review_period",    "VARCHAR",   f"Review quarter: {review_perds}",                 False, False, review_perds),
-                ("review_date",      "DATE",      "Date the review was completed",                   False, False, "2024-03-28, 2024-06-25"),
-                ("score",            "NUMERIC",   "Performance score 1.0–5.0 (1=poor, 5=exceptional)", False, False, "3.5, 4.2, 2.8, 5.0"),
-                ("goals_met",        "BOOLEAN",   "Whether the employee met their goals (true if score ≥ 3.5)", False, False, "true, false"),
-                ("strengths",        "VARCHAR",   "Free-text summary of employee strengths",         False, False, ""),
-                ("areas_to_improve", "VARCHAR",   "Free-text improvement areas",                     False, False, ""),
-            ],
-        },
-        {
-            "name":          "tasks",
-            "description":   (
-                "Work items assigned to employees, stored in MongoDB. "
-                "Each task has a status, priority, project, due date, and estimated/actual hours. "
-                "Cross-source JOIN: tasks.employee_id = postgres_source.public.employees.employee_id"
-            ),
-            "source_type":   "mongodb",
-            "trino_catalog": "mongodb",
-            "trino_schema":  MONGO_DB_NAME,
-            "trino_table":   "tasks",
-            "columns": [
-                ("task_id",         "VARCHAR",   "Unique task identifier, e.g. TASK-00001",          True,  False, "TASK-00001, TASK-00042"),
-                ("title",           "VARCHAR",   "Short title describing the task",                   False, False, "Implement auth feature, Deploy API to staging"),
-                ("description",     "VARCHAR",   "Longer description of what needs to be done",       False, False, ""),
-                ("status",          "VARCHAR",   f"Task status: {task_statuses}",                    False, False, task_statuses),
-                ("priority",        "VARCHAR",   f"Task priority: {task_priorities}",                False, False, task_priorities),
-                ("employee_id",     "INTEGER",   "ID of the employee assigned to this task. JOIN KEY to postgres_source.public.employees.employee_id", False, True, sample_ids),
-                ("created_by",      "INTEGER",   "employee_id of the person who created the task",   False, True, ""),
-                ("project",         "VARCHAR",   f"Project this task belongs to: {projects_sample}", False, False, projects_sample),
-                ("tags",            "ARRAY(VARCHAR)", "Array of tags for categorisation, e.g. ['backend','bug']", False, False, "backend, frontend, hiring"),
-                ("due_date",        "TIMESTAMP", "When the task is due",                              False, False, ""),
-                ("created_at",      "TIMESTAMP", "When the task was created",                         False, False, ""),
-                ("estimated_hours", "DOUBLE",    "Estimated effort in hours",                         False, False, "2.0, 8.0, 16.0"),
-                ("actual_hours",    "DOUBLE",    "Actual hours spent (NULL if not yet completed)",    False, False, ""),
-            ],
-        },
-        {
-            "name":          "employee_profiles",
-            "description":   (
-                "Rich employee profiles stored in MongoDB: skills, certifications, education, "
-                "work preferences, and communication style. One document per employee. "
-                "Cross-source JOIN: employee_profiles.employee_id = postgres_source.public.employees.employee_id"
-            ),
-            "source_type":   "mongodb",
-            "trino_catalog": "mongodb",
-            "trino_schema":  MONGO_DB_NAME,
-            "trino_table":   "employee_profiles",
-            "columns": [
-                ("employee_id",         "INTEGER",        "JOIN KEY to postgres_source.public.employees.employee_id", True, True, sample_ids),
-                ("bio",                 "VARCHAR",        "Short professional bio",                           False, False, "Experienced software engineer with a passion for open source."),
-                ("skills",              "ARRAY(VARCHAR)", "List of technical/professional skills",            False, False, "Python, JIRA, Salesforce, SQL"),
-                ("remote_preference",   "VARCHAR",        "Working arrangement preference: fully_remote, hybrid_2_days, hybrid_3_days, on_site", False, False, "fully_remote, hybrid_2_days"),
-                ("working_hours",       "VARCHAR",        "Preferred working hours window, e.g. 9am-6pm IST", False, False, "9am-6pm IST, flexible"),
-                ("communication_style", "VARCHAR",        "Preferred communication style: async-first, sync-heavy, balanced", False, False, "async-first, balanced"),
-                ("linkedin_url",        "VARCHAR",        "LinkedIn profile URL",                              False, False, ""),
-                ("created_at",          "TIMESTAMP",      "When the profile was created",                     False, False, ""),
-                ("certifications",      "ARRAY(VARCHAR)", "List of professional certifications",          False, False, "AWS Certified, PMP"),
-                ("education",           "ARRAY(VARCHAR)", "List of educational degrees and institutions",     False, False, "B.Tech IIT Delhi"),
-                ("updated_at",          "TIMESTAMP",      "When the profile was last updated",                False, False, ""),
-            ],
-        },
-    ]
-
-    for ds in DATASETS:
-        # Upsert dataset (delete old entry with same name first)
-        cur.execute("DELETE FROM dataset_columns WHERE dataset_id IN "
-                    "(SELECT id FROM datasets WHERE name = %s)", (ds["name"],))
-        cur.execute("DELETE FROM datasets WHERE name = %s", (ds["name"],))
-
-        cur.execute("""
-            INSERT INTO datasets
-                (name, description, source_type, trino_catalog, trino_schema, trino_table)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (ds["name"], ds["description"], ds["source_type"],
-              ds["trino_catalog"], ds["trino_schema"], ds["trino_table"]))
-        ds_id = cur.fetchone()[0]
-
-        col_rows = [
-            (ds_id, col_name, dtype, desc, is_pk, is_join, samples)
-            for col_name, dtype, desc, is_pk, is_join, samples in ds["columns"]
-        ]
-        execute_values(cur, """
-            INSERT INTO dataset_columns
-                (dataset_id, column_name, data_type, description, is_primary_key, is_joinable, sample_values)
-            VALUES %s
-        """, col_rows)
-
-        print(f"  [META] Registered: {ds['name']} ({ds['source_type']}) with {len(ds['columns'])} columns")
-
-    conn_meta.commit()
-    cur.close()
-
-
-def register_relationships(conn_meta) -> None:
-    """Register curated cross-table join hints in table_relationships.
-
-    The AI Engine loads these so it picks the correct join keys — especially
-    for the cross-source PostgreSQL↔MongoDB joins on employee_id, which it
-    would otherwise have to guess. All employee_id columns are INTEGER on both
-    sides (see the MongoDB _schema), so no CAST is needed.
-    """
-    cur = conn_meta.cursor()
-    print("  [META] Registering table relationships …")
-
-    PG = "postgres_source.public"
-    MG = f"mongodb.{MONGO_DB_NAME}"
-
-    # (from_path, from_col, to_path, to_col, join_type, cast_expression, description)
-    rels = [
-        (f"{PG}.employees", "department_id", f"{PG}.departments", "id", "INNER", None,
-         "Each employee belongs to exactly one department."),
-        (f"{MG}.tasks", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
-         "Cross-source: each task is assigned to an employee (both INTEGER)."),
-        (f"{MG}.tasks", "created_by", f"{PG}.employees", "employee_id", "LEFT", None,
-         "Cross-source: the employee who created the task."),
-        (f"{MG}.employee_profiles", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
-         "Cross-source: one rich profile per employee (both INTEGER)."),
-        (f"{PG}.performance_reviews", "employee_id", f"{PG}.employees", "employee_id", "INNER", None,
-         "Each review belongs to the employee being reviewed."),
-        (f"{PG}.performance_reviews", "reviewer_id", f"{PG}.employees", "employee_id", "LEFT", None,
-         "The employee (usually the manager) who conducted the review."),
-    ]
-
-    # Idempotent: clear the relationships this seeder owns, then re-insert.
-    cur.execute(
-        "DELETE FROM table_relationships "
-        "WHERE from_trino_path LIKE 'postgres_source%%' OR from_trino_path LIKE 'mongodb%%'"
-    )
-    execute_values(cur, """
-        INSERT INTO table_relationships
-            (from_trino_path, from_column, to_trino_path, to_column,
-             join_type, cast_expression, description)
-        VALUES %s
-    """, rels)
-
-    conn_meta.commit()
-    cur.close()
-    print(f"  [META] Registered {len(rels)} table relationships")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1063,7 +823,7 @@ def main() -> None:
 """)
 
     # ── PostgreSQL source ────────────────────────────────────────────────────
-    _banner("1/3  PostgreSQL Source  →  source_db")
+    _banner("1/2  PostgreSQL Source  →  source_db")
     print(f"     host={PG_SOURCE_CONFIG['host']}:{PG_SOURCE_CONFIG['port']}")
     try:
         pg_conn = psycopg2.connect(**PG_SOURCE_CONFIG)
@@ -1077,7 +837,7 @@ def main() -> None:
     print(f"  [PG] Done  ({time.perf_counter() - t0:.1f}s)")
 
     # ── MongoDB source ───────────────────────────────────────────────────────
-    _banner("2/3  MongoDB Source  →  employee_db")
+    _banner("2/2  MongoDB Source  →  employee_db")
     print(f"     uri={MONGO_URI}")
     try:
         mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10_000)
@@ -1089,19 +849,6 @@ def main() -> None:
     seed_mongodb(mongo_client[MONGO_DB_NAME], employees)
     mongo_client.close()
     print(f"  [MG] Done  ({time.perf_counter() - t0:.1f}s)")
-
-    # ── Metadata registry ────────────────────────────────────────────────────
-    _banner("3/3  Metadata Registry  →  analytics_meta")
-    print(f"     host={PG_META_CONFIG['host']}:{PG_META_CONFIG['port']}")
-    try:
-        meta_conn = psycopg2.connect(**PG_META_CONFIG)
-    except Exception as e:
-        sys.exit(f"\nERROR connecting to postgres-meta: {e}")
-
-    t0 = time.perf_counter()
-    register_metadata(meta_conn, employees)
-    meta_conn.close()
-    print(f"  [META] Done  ({time.perf_counter() - t0:.1f}s)")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     elapsed = time.perf_counter() - total_start
@@ -1120,14 +867,15 @@ def main() -> None:
 ║  MongoDB (employee_db)                                   ║
 ║    tasks              : {NUM_TASKS:<5}                            ║
 ║    employee_profiles  : {len(employees):<5}                            ║
-║                                                          ║
-║  Metadata registered  : 5 datasets                       ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Cross-source join key:                                  ║
 ║  employees.employee_id ←→ tasks.employee_id              ║
 ║  employees.employee_id ←→ employee_profiles.employee_id  ║
 ╚══════════════════════════════════════════════════════════╝
 
+  → Source data is seeded, but NOT yet registered with the AI Engine.
+    Open http://localhost:3000, go to Data Sources, and click 'Sync Catalogs'
+    to discover these tables via Trino and register datasets/schemas/joins.
   → Run demo queries from  demo_queries.sql
   → Ask the AI natural language questions at  http://localhost:3000
 

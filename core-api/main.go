@@ -42,10 +42,12 @@ func main() {
 	metadataSvc := services.NewMetadataService(db)
 	uploadSvc := services.NewUploadService(cfg.SourceDSN, db)
 	dataSourceSvc := services.NewDataSourceService(
-		db, cfg.TrinoHost, cfg.TrinoPort, aiClient,
+		db, cfg.TrinoHost, cfg.TrinoPort,
 	)
 	dashboardSvc := services.NewDashboardService(db)
+	reportSvc := services.NewReportService(db)
 	conversationSvc := services.NewConversationService(db)
+	curationSvc := services.NewCurationService(db)
 
 	// ── Catalog Auto-Sync ────────────────────────────
 	// Discovers new Trino catalogs/tables (e.g. a freshly added Elasticsearch
@@ -55,13 +57,16 @@ func main() {
 	go runCatalogSyncLoop(dataSourceSvc, cfg.CatalogSyncIntervalSeconds)
 
 	// ── Handlers ────────────────────────────────────
-	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, conversationSvc, cfg.AIEnabled)
+	queryHandler := handlers.NewQueryHandler(aiClient, queryClient, metadataSvc, conversationSvc, curationSvc, cfg.AIEnabled)
 	healthHandler := handlers.NewHealthHandler(cfg.AIEnabled)
 	historyHandler := handlers.NewHistoryHandler(db)
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
-	uploadHandler := handlers.NewUploadHandler(uploadSvc, aiClient)
+	uploadHandler := handlers.NewUploadHandler(uploadSvc)
 	dataSourceHandler := handlers.NewDataSourceHandler(dataSourceSvc)
-	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc, aiClient, queryClient, metadataSvc, cfg.AIEnabled)
+	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc, aiClient, queryClient, cfg.AIEnabled)
+	reportHandler := handlers.NewReportHandler(reportSvc, aiClient, queryClient, cfg.AIEnabled)
+	curationHandler := handlers.NewCurationHandler(curationSvc)
+	conversationsHandler := handlers.NewConversationsHandler(conversationSvc)
 
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
@@ -89,6 +94,12 @@ func main() {
 		api.POST("/query", queryHandler.HandleQuery)
 		api.POST("/query/stream", queryHandler.HandleQueryStream) // SSE (docs/sse-events.md)
 		api.GET("/history", historyHandler.HandleHistory)
+
+		// ── Conversations (PR7) — the "Chats" sidebar tab ────
+		// Distinct from /history (audit_logs): these are multi-turn NL threads
+		// with structured turns, used to hydrate the transcript on reopen.
+		api.GET("/conversations", conversationsHandler.HandleList)
+		api.GET("/conversations/:id/turns", conversationsHandler.HandleTurns)
 
 		// ── Metadata & Upload ───────────────────────────────
 		api.GET("/metadata/datasets", metadataHandler.HandleDatasets)
@@ -120,6 +131,30 @@ func main() {
 		api.POST("/dashboards/:id/widgets", dashboardHandler.HandleCreateWidget)
 		api.PUT("/dashboards/:id/widgets/:wid", dashboardHandler.HandleUpdateWidget)
 		api.DELETE("/dashboards/:id/widgets/:wid", dashboardHandler.HandleDeleteWidget)
+
+		// ── Reports (Excel export) ──────────────────────────
+		// Persisted sheet-query definitions; /download executes every sheet
+		// live and streams a formatted workbook (rows are never stored).
+		api.GET("/reports", reportHandler.HandleList)
+		api.POST("/reports", reportHandler.HandleCreate)
+		api.POST("/reports/generate", reportHandler.HandleGenerate)
+		api.POST("/reports/generate/stream", reportHandler.HandleGenerateStream) // SSE
+		api.POST("/reports/:id/refine", reportHandler.HandleRefine)
+		api.POST("/reports/:id/refine/stream", reportHandler.HandleRefineStream) // SSE
+		api.GET("/reports/:id", reportHandler.HandleGet)
+		api.PUT("/reports/:id", reportHandler.HandleUpdate)
+		api.DELETE("/reports/:id", reportHandler.HandleDelete)
+		api.GET("/reports/:id/download", reportHandler.HandleDownload)
+		api.POST("/reports/:id/sheets", reportHandler.HandleCreateSheet)
+		api.PUT("/reports/:id/sheets/:sid", reportHandler.HandleUpdateSheet)
+		api.DELETE("/reports/:id/sheets/:sid", reportHandler.HandleDeleteSheet)
+
+		// ── Curation Queue (PR6) ─────────────────────────────
+		// Lists AI queries that could not be auto-resolved (repair_exhausted or
+		// zero_rows_unresolved). Operators resolve items by flipping status via SQL.
+		// TODO(security): uses same static bearer token as all other endpoints;
+		// tighten when real auth lands.
+		api.GET("/curation", curationHandler.HandleList)
 	}
 
 	// ── HTTP Server with Graceful Shutdown ────────────────────

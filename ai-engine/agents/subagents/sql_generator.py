@@ -76,6 +76,15 @@ differently named than you'd guess (e.g. a table may have "name" rather than
 doesn't list a column you need, say so in the explanation and lower your
 confidence instead of guessing.
 
+### Coded-Column Lookups (MANDATORY)
+When a "Coded-Column Lookups" block appears in the schema context, NEVER guess
+a literal value for a lookup-bound column (tagged [LOOKUP-BOUND]). Instead, use
+the subquery pattern shown in that block — e.g.:
+  WHERE nationality IN (SELECT code FROM reference.countries WHERE lower(name) = lower('India'))
+If the user's term doesn't clearly map to any match column in the lookup,
+lower confidence or set clarification_question with kind "unresolved_value" —
+do NOT invent a code.
+
 ### Cross-Source JOINs
 - Trino federates across sources automatically with standard SQL JOINs
 - Type matching is critical: the same logical id may be INTEGER in one source

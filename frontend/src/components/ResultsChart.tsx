@@ -103,11 +103,19 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
     else if (isPieable) autoType = "pie";
     else autoType = "bar";
 
-    // Base colors
+    // Coral monochrome ramp — a single-hue palette so charts read as one
+    // color system (matches the v3 single-accent UI). Cycles for multi-series
+    // and for per-row single-series bars.
     const baseColors = [
-      "#2563eb", "#7c3aed", "#0891b2", "#059669",
-      "#d97706", "#dc2626", "#db2777", "#65a30d",
+      "#d4816a", "#eb9c83", "#b5674f", "#f4c2b1",
+      "#8f4d39", "#c9765d", "#e0a892", "#6b3829",
     ];
+    // Shared dark-theme chart chrome.
+    const AXIS = "#8a827b";
+    const GRID = "rgba(255,255,255,0.06)";
+    const AXIS_LINE = "rgba(255,255,255,0.12)";
+    const TOOLTIP_BG = "rgba(8,8,9,0.96)";
+    const accentFade = (o: number) => `rgba(212,129,106,${o})`;
 
     const effectiveType = userChartType === "auto" ? autoType : userChartType;
 
@@ -131,15 +139,15 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
           tooltip: {
             trigger: "item",
             formatter: "{b}: {c} ({d}%)",
-            backgroundColor: "rgba(15,23,42,0.95)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#1e293b" },
+            backgroundColor: TOOLTIP_BG,
+            borderColor: AXIS_LINE,
+            textStyle: { color: "#f2efea" },
           },
           legend: {
             orient: "vertical",
             right: "5%",
             top: "middle",
-            textStyle: { color: "#64748b", fontSize: 11 },
+            textStyle: { color: AXIS, fontSize: 11 },
           },
           series: [{
             type: "pie",
@@ -147,8 +155,8 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
             center: ["42%", "50%"],
             data: pieLabels.map((label, i) => ({ name: label, value: values[i] })),
             emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(0,0,0,0.2)" } },
-            itemStyle: { borderRadius: 3, borderColor: "#f8fafc", borderWidth: 2 },
-            label: { color: "#475569", fontSize: 11 },
+            itemStyle: { borderRadius: 3, borderColor: "#000000", borderWidth: 2 },
+            label: { color: AXIS, fontSize: 11 },
             color: baseColors,
           }],
         },
@@ -170,8 +178,8 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
           color: {
             type: "linear", x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: "rgba(37,99,235,0.15)" },
-              { offset: 1, color: "rgba(37,99,235,0.01)" },
+              { offset: 0, color: accentFade(0.2) },
+              { offset: 1, color: accentFade(0.01) },
             ],
           },
         } : undefined,
@@ -184,25 +192,25 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
           backgroundColor: "transparent",
           tooltip: {
             trigger: "axis",
-            backgroundColor: "rgba(15,23,42,0.92)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#e2e8f0", fontSize: 12 },
+            backgroundColor: TOOLTIP_BG,
+            borderColor: AXIS_LINE,
+            textStyle: { color: "#f2efea", fontSize: 12 },
           },
           legend: numericCols.length > 1 ? {
-            textStyle: { color: "#64748b", fontSize: 11 },
+            textStyle: { color: AXIS, fontSize: 11 },
             top: 0,
           } : undefined,
           grid: { left: "3%", right: "4%", bottom: "15%", top: numericCols.length > 1 ? "15%" : "8%", containLabel: true },
           xAxis: {
             type: "category",
             data: labels,
-            axisLabel: { color: "#94a3b8", rotate: rows.length > 12 ? 45 : 0, fontSize: 11 },
-            axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
+            axisLabel: { color: AXIS, rotate: rows.length > 12 ? 45 : 0, fontSize: 11 },
+            axisLine: { lineStyle: { color: AXIS_LINE } },
           },
           yAxis: {
             type: "value",
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
-            splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
+            axisLabel: { color: AXIS, fontSize: 11 },
+            splitLine: { lineStyle: { color: GRID } },
           },
           series,
         },
@@ -227,7 +235,7 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
       label: numericCols.length === 1 ? {
         show: true,
         position: isHorizontal ? "right" : "top",
-        color: "#64748b",
+        color: AXIS,
         fontSize: 10,
         formatter: (p: { value: number | null }) =>
           p.value !== null && typeof p.value === "number"
@@ -245,26 +253,26 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
           tooltip: {
             trigger: "axis",
             axisPointer: { type: "shadow" },
-            backgroundColor: "rgba(15,23,42,0.92)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#e2e8f0", fontSize: 12 },
+            backgroundColor: TOOLTIP_BG,
+            borderColor: AXIS_LINE,
+            textStyle: { color: "#f2efea", fontSize: 12 },
           },
-          legend: numericCols.length > 1 ? { textStyle: { color: "#64748b", fontSize: 11 } } : undefined,
+          legend: numericCols.length > 1 ? { textStyle: { color: AXIS, fontSize: 11 } } : undefined,
           grid: { left: "3%", right: numericCols.length === 1 ? "12%" : "5%", bottom: "5%", top: numericCols.length > 1 ? "12%" : "5%", containLabel: true },
           xAxis: {
             type: "value",
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
-            splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
+            axisLabel: { color: AXIS, fontSize: 11 },
+            splitLine: { lineStyle: { color: GRID } },
           },
           yAxis: {
             type: "category",
             data: labels,
             axisLabel: {
-              color: "#64748b",
+              color: AXIS,
               fontSize: 11,
               formatter: (val: string) => val.length > 22 ? val.slice(0, 22) + "…" : val,
             },
-            axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
+            axisLine: { lineStyle: { color: AXIS_LINE } },
           },
           series,
         },
@@ -280,22 +288,22 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "shadow" },
-          backgroundColor: "rgba(15,23,42,0.92)",
-          borderColor: "rgba(148,163,184,0.2)",
-          textStyle: { color: "#e2e8f0", fontSize: 12 },
+          backgroundColor: TOOLTIP_BG,
+          borderColor: AXIS_LINE,
+          textStyle: { color: "#f2efea", fontSize: 12 },
         },
-        legend: numericCols.length > 1 ? { textStyle: { color: "#64748b", fontSize: 11 } } : undefined,
+        legend: numericCols.length > 1 ? { textStyle: { color: AXIS, fontSize: 11 } } : undefined,
         grid: { left: "3%", right: "4%", bottom: "15%", top: numericCols.length > 1 ? "15%" : "5%", containLabel: true },
         xAxis: {
           type: "category",
           data: labels,
-          axisLabel: { color: "#94a3b8", rotate: rows.length > 6 ? 35 : 0, fontSize: 11 },
-          axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
+          axisLabel: { color: AXIS, rotate: rows.length > 6 ? 35 : 0, fontSize: 11 },
+          axisLine: { lineStyle: { color: AXIS_LINE } },
         },
         yAxis: {
           type: "value",
-          axisLabel: { color: "#94a3b8", fontSize: 11 },
-          splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
+          axisLabel: { color: AXIS, fontSize: 11 },
+          splitLine: { lineStyle: { color: GRID } },
         },
         series,
       },

@@ -40,38 +40,58 @@ func NewAIClient(baseURL string) *AIClient {
 type PlanRequest struct {
 	Question string               `json:"question"`
 	Datasets []models.DatasetMeta `json:"datasets,omitempty"`
-	// ConversationContext is a pre-rendered block of prior turns in the same
-	// conversation (empty when there's no multi-turn context). The AI Engine
-	// injects it into the planner prompt so follow-ups resolve against history.
-	ConversationContext string `json:"conversation_context,omitempty"`
+	// Messages are structured prior turns of the same conversation (Core API
+	// assembles these from conversation_turns). The AI Engine renders them to
+	// text and injects into the planner prompt so follow-ups resolve against
+	// history. Replaces the old flat ConversationContext string (PR4).
+	Messages []models.ChatMessage `json:"messages,omitempty"`
 }
 
 // DashboardPlanRequest is the payload for AI dashboard generation/refinement.
+//
+// Datasets is omitempty and no longer populated: like the query path, the AI
+// Engine self-loads the catalog from postgres-meta, so the Core API stops
+// pushing it. The field remains only so the contract is explicit.
 type DashboardPlanRequest struct {
 	Prompt           string                 `json:"prompt"`
-	Datasets         []models.DatasetMeta   `json:"datasets"`
+	Datasets         []models.DatasetMeta   `json:"datasets,omitempty"`
 	CurrentDashboard map[string]interface{} `json:"current_dashboard,omitempty"`
 }
 
+// planOutcome is the envelope the AI Engine returns from /api/plan (PR5):
+// exactly one of Plan or Clarification is set.
+type planOutcome struct {
+	Plan          *models.QueryPlan      `json:"plan"`
+	Clarification *models.Clarification  `json:"clarification"`
+	Path          string                 `json:"path"`
+}
+
 // GeneratePlan calls the AI Engine to convert a natural language question
-// into a structured QueryPlan.
-func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.DatasetMeta, conversationContext string) (*models.QueryPlan, error) {
+// into a structured QueryPlan, or receive a Clarification when the input is
+// ambiguous. Exactly one of plan/clarification is non-nil on success.
+func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.DatasetMeta, messages []models.ChatMessage) (*models.QueryPlan, *models.Clarification, error) {
 	reqBody := PlanRequest{
-		Question:            question,
-		Datasets:            datasets,
-		ConversationContext: conversationContext,
+		Question: question,
+		Datasets: datasets,
+		Messages: messages,
 	}
 
 	resp, err := postJSON(c.httpClient, c.baseURL+"/api/plan", requestID, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("AI engine request failed: %w", err)
+		return nil, nil, fmt.Errorf("AI engine request failed: %w", err)
 	}
 
-	var plan models.QueryPlan
-	if err := decodeJSON(resp, "AI engine", &plan); err != nil {
-		return nil, err
+	var outcome planOutcome
+	if err := decodeJSON(resp, "AI engine", &outcome); err != nil {
+		return nil, nil, err
 	}
-	return &plan, nil
+	if outcome.Clarification != nil {
+		return nil, outcome.Clarification, nil
+	}
+	if outcome.Plan == nil {
+		return nil, nil, fmt.Errorf("AI engine returned neither a plan nor a clarification")
+	}
+	return outcome.Plan, nil, nil
 }
 
 // StreamPlan opens the AI Engine's streaming plan endpoint and invokes
@@ -82,13 +102,13 @@ func (c *AIClient) GeneratePlan(requestID, question string, datasets []models.Da
 func (c *AIClient) StreamPlan(
 	requestID, question string,
 	datasets []models.DatasetMeta,
-	conversationContext string,
+	messages []models.ChatMessage,
 	onEvent func(SSEEvent) error,
 ) error {
 	reqBody := PlanRequest{
-		Question:            question,
-		Datasets:            datasets,
-		ConversationContext: conversationContext,
+		Question: question,
+		Datasets: datasets,
+		Messages: messages,
 	}
 	return c.streamSSE("/api/plan/stream", requestID, reqBody, onEvent)
 }
@@ -98,10 +118,9 @@ func (c *AIClient) StreamPlan(
 // with a natural-language instruction instead of creating one from scratch.
 func (c *AIClient) GenerateDashboardPlan(
 	requestID, prompt string,
-	datasets []models.DatasetMeta,
 	current *models.Dashboard,
 ) (*models.DashboardPlan, error) {
-	reqBody := buildDashboardPlanRequest(prompt, datasets, current)
+	reqBody := buildDashboardPlanRequest(prompt, current)
 
 	resp, err := postJSON(c.httpClient, c.baseURL+"/api/dashboard-plan", requestID, reqBody)
 	if err != nil {
@@ -120,11 +139,10 @@ func (c *AIClient) GenerateDashboardPlan(
 // onEvent, terminating with a dashboard_plan or error event.
 func (c *AIClient) StreamDashboardPlan(
 	requestID, prompt string,
-	datasets []models.DatasetMeta,
 	current *models.Dashboard,
 	onEvent func(SSEEvent) error,
 ) error {
-	reqBody := buildDashboardPlanRequest(prompt, datasets, current)
+	reqBody := buildDashboardPlanRequest(prompt, current)
 	return c.streamSSE("/api/dashboard-plan/stream", requestID, reqBody, onEvent)
 }
 
@@ -132,12 +150,10 @@ func (c *AIClient) StreamDashboardPlan(
 // blocking and streaming dashboard-plan calls.
 func buildDashboardPlanRequest(
 	prompt string,
-	datasets []models.DatasetMeta,
 	current *models.Dashboard,
 ) DashboardPlanRequest {
 	reqBody := DashboardPlanRequest{
-		Prompt:   prompt,
-		Datasets: datasets,
+		Prompt: prompt,
 	}
 	if current != nil {
 		// Send only what the designer needs — no IDs or timestamps.
@@ -154,6 +170,81 @@ func buildDashboardPlanRequest(
 			"name":        current.Name,
 			"description": current.Description,
 			"widgets":     widgets,
+		}
+	}
+	return reqBody
+}
+
+// ReportPlanRequest is the payload for AI report generation/refinement.
+// Like DashboardPlanRequest, the AI Engine self-loads the catalog — the Core
+// API only sends the brief and (when refining) the report as it exists now.
+type ReportPlanRequest struct {
+	Prompt        string                 `json:"prompt"`
+	CurrentReport map[string]interface{} `json:"current_report,omitempty"`
+}
+
+// GenerateReportPlan asks the AI Engine's report designer for a full Excel
+// report proposal. Pass current != nil to refine an existing report with a
+// natural-language instruction instead of creating one from scratch.
+func (c *AIClient) GenerateReportPlan(
+	requestID, prompt string,
+	current *models.Report,
+) (*models.ReportPlan, error) {
+	reqBody := buildReportPlanRequest(prompt, current)
+
+	resp, err := postJSON(c.httpClient, c.baseURL+"/api/report-plan", requestID, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("AI engine request failed: %w", err)
+	}
+
+	var plan models.ReportPlan
+	if err := decodeJSON(resp, "AI engine", &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
+}
+
+// StreamReportPlan is the streaming counterpart of GenerateReportPlan:
+// same request body, but pipeline progress arrives as SSE frames passed to
+// onEvent, terminating with a report_plan or error event.
+func (c *AIClient) StreamReportPlan(
+	requestID, prompt string,
+	current *models.Report,
+	onEvent func(SSEEvent) error,
+) error {
+	reqBody := buildReportPlanRequest(prompt, current)
+	return c.streamSSE("/api/report-plan/stream", requestID, reqBody, onEvent)
+}
+
+// buildReportPlanRequest assembles the designer payload shared by the
+// blocking and streaming report-plan calls.
+func buildReportPlanRequest(
+	prompt string,
+	current *models.Report,
+) ReportPlanRequest {
+	reqBody := ReportPlanRequest{
+		Prompt: prompt,
+	}
+	if current != nil {
+		// Send only what the designer needs — no IDs or timestamps.
+		sheets := make([]map[string]interface{}, 0, len(current.Sheets))
+		for _, sh := range current.Sheets {
+			columnFormats := sh.ColumnFormats
+			if columnFormats == "" {
+				columnFormats = "{}"
+			}
+			sheets = append(sheets, map[string]interface{}{
+				"title":          sh.Title,
+				"description":    sh.Description,
+				"sql":            sh.QuerySQL,
+				"column_formats": json.RawMessage(columnFormats),
+				"position":       sh.Position,
+			})
+		}
+		reqBody.CurrentReport = map[string]interface{}{
+			"name":        current.Name,
+			"description": current.Description,
+			"sheets":      sheets,
 		}
 	}
 	return reqBody
@@ -180,34 +271,36 @@ func (c *AIClient) streamSSE(
 	return parseSSEStream(resp.Body, onEvent)
 }
 
-// RepairWidgetRequest is the payload for fixing a single widget query that
-// failed to execute against Trino.
+// RepairWidgetRequest is the payload for fixing a single query or widget.
+//
+// mode="error" (default): SQL failed to execute — fix the broken identifiers.
+// mode="zero_rows": SQL ran fine but returned no rows — correct filter literals.
 type RepairWidgetRequest struct {
 	SQL       string               `json:"sql"`
 	Error     string               `json:"error"`
 	ChartType string               `json:"chart_type"`
 	Title     string               `json:"title"`
 	Datasets  []models.DatasetMeta `json:"datasets,omitempty"`
+	Mode      string               `json:"mode,omitempty"`
 }
 
 type repairWidgetResponse struct {
 	SQL string `json:"sql"`
 }
 
-// RepairWidgetSQL asks the AI Engine to correct a widget query that failed to
-// execute, given the exact engine error and the schema context. It returns the
-// repaired SQL — which the caller must still re-verify against the Query
-// Service, since the AI Engine never executes anything itself.
+// RepairWidgetSQL asks the AI Engine to correct a query. mode selects the
+// repair variant: "error" (default) fixes execution failures; "zero_rows"
+// corrects filter literals when a query ran cleanly but returned no rows.
+// The caller must re-verify the returned SQL — the AI Engine never executes.
 func (c *AIClient) RepairWidgetSQL(
-	requestID, sql, execErr, chartType, title string,
-	datasets []models.DatasetMeta,
+	requestID, sql, execErr, chartType, title, mode string,
 ) (string, error) {
 	reqBody := RepairWidgetRequest{
 		SQL:       sql,
 		Error:     execErr,
 		ChartType: chartType,
 		Title:     title,
-		Datasets:  datasets,
+		Mode:      mode,
 	}
 
 	resp, err := postJSON(c.httpClient, c.baseURL+"/api/repair-widget", requestID, reqBody)
@@ -223,22 +316,4 @@ func (c *AIClient) RepairWidgetSQL(
 		return "", fmt.Errorf("AI engine repair returned empty SQL")
 	}
 	return out.SQL, nil
-}
-
-// InvalidateCache tells the AI Engine to drop its schema metadata cache so
-// newly uploaded tables and refreshed schemas appear in the next NL→SQL
-// prompt. Best-effort: failures are ignored — the cache expires naturally.
-func (c *AIClient) InvalidateCache() {
-	if c.baseURL == "" {
-		return
-	}
-	// Short dedicated timeout — this is fire-and-forget housekeeping and must
-	// not hold callers (upload, schema refresh) for the full pipeline budget.
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(c.baseURL+"/api/invalidate-cache", "application/json", strings.NewReader("{}"))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 }

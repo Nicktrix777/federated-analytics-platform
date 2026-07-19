@@ -178,13 +178,16 @@ async def _async_get_columns(trino_path: str) -> str:
     except Exception as e:
         logger.warning(f"Trino column fetch failed for {trino_path}: {e}")
 
-    # Enrich with postgres-meta descriptions
+    # Enrich with postgres-meta descriptions + column_profiles
     try:
         async with meta_connection() as conn:
             meta_cols = await conn.fetch("""
-                SELECT dc.column_name, dc.description, dc.is_joinable, dc.sample_values
+                SELECT dc.column_name, dc.description, dc.is_joinable,
+                       dc.semantic_type,
+                       cp.sample_values, cp.pattern
                 FROM dataset_columns dc
                 JOIN datasets d ON d.id = dc.dataset_id
+                LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
                 WHERE d.trino_table = $1 AND d.is_active = true
             """, table)
         for mc in meta_cols:
@@ -193,6 +196,10 @@ async def _async_get_columns(trino_path: str) -> str:
                 trino_cols[col_name]["description"] = mc["description"] or ""
                 trino_cols[col_name]["is_joinable"] = mc["is_joinable"]
                 trino_cols[col_name]["sample_values"] = mc["sample_values"] or ""
+                if mc["semantic_type"]:
+                    trino_cols[col_name]["semantic_type"] = mc["semantic_type"]
+                if mc["pattern"]:
+                    trino_cols[col_name]["pattern"] = mc["pattern"]
     except Exception as e:
         logger.warning(f"Could not enrich column metadata from postgres-meta: {e}")
 

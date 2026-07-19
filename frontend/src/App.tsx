@@ -4,23 +4,21 @@ import {
   Routes,
   Route,
   NavLink,
-  useLocation,
 } from "react-router-dom";
 import Header from "./components/Header";
 import QueryInput, { QueryInputHandle } from "./components/QueryInput";
-import QueryPlanView from "./components/QueryPlan";
-import ResultsTable from "./components/ResultsTable";
-import ResultsChart from "./components/ResultsChart";
 import LeftSidebar from "./components/LeftSidebar";
 import FileUpload from "./components/FileUpload";
-import AIProgressTimeline from "./components/AIProgressTimeline";
+import Transcript from "./components/Transcript";
 import { useQuery } from "./hooks/useQuery";
 import { api } from "./api/client";
-import type { DatasetMeta, QueryMode } from "./types";
+import type { DatasetMeta, QueryMode, ConversationSummary } from "./types";
 
 // New pages
 import DashboardsListPage from "./pages/DashboardsListPage";
 import DashboardBuilderPage from "./pages/DashboardBuilderPage";
+import ReportsListPage from "./pages/ReportsListPage";
+import ReportDetailPage from "./pages/ReportDetailPage";
 import DataSourcesPage from "./pages/DataSourcesPage";
 
 import "./App.css";
@@ -43,6 +41,12 @@ function NavBar() {
         📊 Dashboards
       </NavLink>
       <NavLink
+        to="/reports"
+        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
+      >
+        📄 Reports
+      </NavLink>
+      <NavLink
         to="/datasources"
         className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
       >
@@ -54,85 +58,95 @@ function NavBar() {
 
 // ── Query / Home page ─────────────────────────────────────────
 function QueryPage() {
-  const [aiEnabled, setAiEnabled] = useState(true);
+  const [aiEnabled] = useState(true);
   const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [showUpload, setShowUpload] = useState(false);
 
   const queryInputRef = useRef<QueryInputHandle>(null);
 
   const {
     status,
-    result,
-    error,
+    turns,
     history,
-    progress,
     executeQuery,
     loadHistory,
-    reset,
+    newConversation,
+    loadConversation,
   } = useQuery();
 
   const refreshDatasets = useCallback(async () => {
     try {
-      const data = await api.getDatasets();
-      setDatasets(data || []);
+      setDatasets((await api.getDatasets()) || []);
+    } catch {
+      // non-critical
+    }
+  }, []);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations((await api.getConversations(30)) || []);
     } catch {
       // non-critical
     }
   }, []);
 
   useEffect(() => {
-    const init = async () => {
-      await Promise.all([refreshDatasets(), loadHistory()]);
-    };
-    init();
+    void Promise.all([refreshDatasets(), loadHistory(), refreshConversations()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleQuery = (question: string, mode: QueryMode) => {
-    executeQuery(question, mode);
-  };
+  // Run a query, then refresh the chat list so a new thread / title appears.
+  const handleQuery = useCallback(
+    async (question: string, mode: QueryMode) => {
+      await executeQuery(question, mode);
+      refreshConversations();
+    },
+    [executeQuery, refreshConversations]
+  );
 
-  const handleSuggestionClick = (question: string) => {
-    if (queryInputRef.current) {
-      queryInputRef.current.setQuery(question, "ai");
-    }
-    executeQuery(question, "ai");
-  };
+  const handleNewChat = useCallback(() => {
+    newConversation();
+    queryInputRef.current?.setQuery("", aiEnabled ? "ai" : "sql");
+  }, [newConversation, aiEnabled]);
 
-  const handleReset = () => {
-    reset();
-    if (queryInputRef.current) {
-      queryInputRef.current.setQuery("", "sql");
-    }
-  };
+  const handleChatSelect = useCallback(
+    (id: string) => {
+      void loadConversation(id);
+    },
+    [loadConversation]
+  );
 
   const handleUploadSuccess = useCallback(async () => {
     setShowUpload(false);
     await refreshDatasets();
   }, [refreshDatasets]);
 
+  const hasTurns = turns.length > 0;
+
   return (
     <div className="app-layout">
       <LeftSidebar
         datasets={datasets}
         history={history}
+        conversations={conversations}
         onHistorySelect={(question, mode) => handleQuery(question, mode as QueryMode)}
+        onChatSelect={handleChatSelect}
+        onNewChat={handleNewChat}
         onQueryTable={(trinoPath) => {
-          if (queryInputRef.current) queryInputRef.current.setQuery(`SELECT * FROM ${trinoPath} LIMIT 10`, "sql");
+          queryInputRef.current?.setQuery(`SELECT * FROM ${trinoPath} LIMIT 10`, "sql");
         }}
-        onInsertColumn={(trinoPath, col) => {
-          if (queryInputRef.current) queryInputRef.current.insertText(`${col}`);
+        onInsertColumn={(_trinoPath, col) => {
+          queryInputRef.current?.insertText(`${col}`);
         }}
       />
 
-      <main className="main-content">
+      <main className="main-content main-content--chat">
         {showUpload ? (
           <div className="upload-container">
             <div className="upload-header">
               <h2>Upload Dataset</h2>
-              <button
-                className="btn-ghost"
-                onClick={() => setShowUpload(false)}
-              >
+              <button className="btn-ghost" onClick={() => setShowUpload(false)}>
                 ✕ Close
               </button>
             </div>
@@ -140,74 +154,32 @@ function QueryPage() {
           </div>
         ) : (
           <>
-            <QueryInput
-              ref={queryInputRef}
-              onSubmit={handleQuery}
-              status={status}
-              aiEnabled={aiEnabled}
-              hasResults={!!result}
-              onNewQuery={handleReset}
-            />
-
-            {progress.length > 0 && status !== "idle" && (
-              <AIProgressTimeline
-                events={progress}
-                active={status === "loading"}
+            {hasTurns ? (
+              <Transcript
+                turns={turns}
+                onClarify={(option) => handleQuery(option, "ai")}
               />
-            )}
-
-            {status === "error" && error && (
-              <div className="error-banner">
-                <div className="error-banner-content">
-                  <span className="error-icon">⚠️</span>
-                  <div>
-                    <strong>Query Failed</strong>
-                    <p>{error}</p>
-                  </div>
-                </div>
-                <button className="error-dismiss" onClick={handleReset}>
-                  ✕
-                </button>
+            ) : (
+              <div className="chat-welcome">
+                <div className="chat-welcome-mark">◆</div>
+                <h2>Ask your data anything</h2>
+                <p>
+                  Natural-language questions across every connected source.
+                  Follow up to refine — the thread remembers.
+                </p>
               </div>
             )}
 
-            {status === "success" && result && (
-              <div className="results-container">
-                {result.plan && (
-                  <QueryPlanView 
-                    plan={result.plan}
-                    executionTimeMs={result.execution_time_ms}
-                    rowCount={result.row_count}
-                    mode={result.mode}
-                  />
-                )}
-                {result.columns && result.columns.length > 0 && (
-                  <>
-                    <div className="results-meta">
-                      <span>
-                        {result.row_count} row{result.row_count !== 1 ? "s" : ""}
-                      </span>
-                      <span>{result.execution_time_ms}ms</span>
-                      <button
-                        className="btn-ghost btn-sm"
-                        onClick={handleReset}
-                      >
-                        New Query
-                      </button>
-                    </div>
-                    <ResultsChart
-                      columns={result.columns}
-                      rows={result.rows as string[][]}
-                    />
-                    <ResultsTable
-                      columns={result.columns}
-                      rows={result.rows as string[][]}
-                      rowCount={result.row_count}
-                    />
-                  </>
-                )}
-              </div>
-            )}
+            <div className="composer-dock">
+              <QueryInput
+                ref={queryInputRef}
+                onSubmit={handleQuery}
+                status={status}
+                aiEnabled={aiEnabled}
+                hasResults={hasTurns}
+                onNewQuery={handleNewChat}
+              />
+            </div>
           </>
         )}
       </main>
@@ -227,6 +199,8 @@ const App: React.FC = () => {
             <Route path="/" element={<QueryPage />} />
             <Route path="/dashboards" element={<DashboardsListPage />} />
             <Route path="/dashboards/:id" element={<DashboardBuilderPage />} />
+            <Route path="/reports" element={<ReportsListPage />} />
+            <Route path="/reports/:id" element={<ReportDetailPage />} />
             <Route path="/datasources" element={<DataSourcesPage />} />
           </Routes>
         </div>

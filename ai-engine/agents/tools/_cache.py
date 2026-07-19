@@ -38,6 +38,6 @@ def async_ttl_cache(ttl_seconds: float):
 
 
 def clear_all() -> None:
-    """Drop every cached entry — call this on /api/invalidate-cache."""
+    """Drop every cached entry — called by the metadata-version watcher on change."""
     for cache in _caches:
         cache.clear()

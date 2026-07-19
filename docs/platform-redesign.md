@@ -280,7 +280,16 @@ Pure refactor — the rendering logic already exists.
      worker is its own step (belongs with step 2's worker).
 2. **Split `column_profiles` out; add `semantic_type` + `sensitivity`.** Sampler
    writes the new table with gating; curated fields protected structurally.
-3. **One `ContextBundle` builder.** Pure refactor; unifies the two renderers.
+3. **One `ContextBundle` builder. (DONE)** Pure refactor; unifies the two
+   renderers into `ai-engine/context_bundle.py` (`build_context_bundle` +
+   `render_fast_path_system_prompt`/`render_fast_path_user_prompt`/
+   `render_extra_context`). Absorbed the plan/dashboard/repair self-load +
+   schema-RAG trim + relationships/examples loaders out of `main.py`; the
+   dashboard pipeline now self-loads too (correction #2). Deleted
+   `prompt_builder.py`; dropped the last dataset push from Core API
+   (dashboard + widget repair). Column lines with absent/gated samples but a
+   detected pattern now render a `[format: <pattern>]` shape hint. Migration
+   `0004` drops the legacy `dataset_columns.sample_values`.
 4. **Structured transcript replay.** Replace the `conversation_context` text
    blob with a `messages` array persisted in `conversation_turns` and resent per
    turn. Planner stays stateless.

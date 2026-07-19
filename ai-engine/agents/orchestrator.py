@@ -41,7 +41,7 @@ from agents.subagents.sql_generator import SQL_GENERATOR_SUBAGENT
 from agents.tools.schema_tools import list_available_sources
 from config import settings
 from events import AgentEventRelay, EventEmitter, NullEmitter
-from models import QueryPlan, QueryStep
+from models import Clarification, QueryPlan, QueryStep
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +57,15 @@ class QueryStepDesign(BaseModel):
 
 class QueryPlanDesign(BaseModel):
     question: str = ""
-    sql: str = Field(description="Complete Trino SELECT SQL from sql-generator")
+    sql: Optional[str] = Field(default=None, description="Complete Trino SELECT SQL from sql-generator (omit when clarifying)")
     steps: list[QueryStepDesign] = Field(default_factory=list)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     explanation: str = ""
+    # PR5: flat optional clarification fields — NOT a Pydantic Union
+    # (response_format reliability through deepagents structured output).
+    clarification_question: Optional[str] = Field(default=None, description="A clarifying question to ask the user instead of guessing")
+    clarification_options: list[str] = Field(default_factory=list, description="Suggested answer options for the clarification")
+    clarification_kind: str = Field(default="ambiguous", description="Kind of clarification: ambiguous_entity, unresolved_value, missing_data, ambiguous")
 
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are the Query Planner for a Federated Analytics Platform.
@@ -81,8 +86,10 @@ dataset names, Trino paths, and columns there.
 Provide the schema context to the sql-generator subagent VERBATIM — do NOT summarize or trim it.
 You MUST forward, unchanged:
   - the exact Trino table paths (with quotes),
-  - the nested-field access paths and CROSS JOIN UNNEST recipes, and
-  - every "Known ... field values" list and per-field sample values ([e.g. ...]) from the context.
+  - the nested-field access paths and CROSS JOIN UNNEST recipes,
+  - every "Known ... field values" list and per-field sample values ([e.g. ...]) from the context,
+  - the entire "Coded-Column Lookups" block (if present) — the generator needs it to write
+    subqueries instead of guessing coded literals.
 Those sample values are how the generator picks correct filter literals — e.g. that nationality
 is stored as the code 'IND', not the word 'Indian'. If you drop them, the query runs but returns
 wrong/zero results. When unsure how much to pass, pass MORE, not less.
@@ -97,18 +104,31 @@ fields: question (the original question), sql (the Trino SQL from sql-generator,
 steps (one entry per table read: step_id, description, catalog, schema_name, table),
 confidence (0.0-1.0), explanation (human-readable description of what the query does).
 
+## Clarify Instead of Guessing (PR5)
+When the question is genuinely ambiguous, unclear, or references data that doesn't exist:
+- If you can't determine WHICH table/column the user means (e.g. "show data for India" and
+  multiple datasets have country columns), set clarification_question and clarification_options
+  instead of sql. Leave sql empty.
+- If a filter value doesn't match anything in the known sample values, set clarification_question
+  with kind "unresolved_value".
+- If no dataset covers what the user is asking about, set kind "missing_data".
+- Provide 2-4 concise options when possible (the user will click one).
+- Do NOT clarify trivial ambiguities — only when the choice would materially change the query.
+- If you're unsure whether to clarify or plan, prefer planning with a lower confidence and
+  clear explanation.
+
 ## Important Rules
 - NEVER generate INSERT, UPDATE, DELETE, or DDL statements
 - If confidence < 0.3, still return the plan with a clear explanation of limitations
 """
 
 
-def create_query_planner(model: str = "openai:gpt-4o") -> object:
+def create_query_planner(model: str = "anthropic:claude-sonnet-5") -> object:
     """
     Create the main query planner deepagent.
 
     Args:
-        model: deepagents model string (e.g., 'openai:gpt-4o')
+        model: deepagents model string (e.g., 'anthropic:claude-sonnet-5')
 
     Returns:
         A compiled deepagent graph ready to invoke
@@ -135,9 +155,9 @@ async def generate_query_plan(
     question: str,
     extra_context: Optional[str] = None,
     emitter: Optional[EventEmitter] = None,
-) -> QueryPlan:
+) -> "QueryPlan | Clarification":
     """
-    Invoke the query planner and extract a structured QueryPlan.
+    Invoke the query planner and extract a structured QueryPlan or Clarification.
 
     Args:
         agent: The compiled deepagent from create_query_planner()
@@ -147,10 +167,10 @@ async def generate_query_plan(
         emitter: Progress event sink for SSE streaming (NullEmitter if absent)
 
     Returns:
-        A validated QueryPlan Pydantic model
+        A validated QueryPlan or Clarification Pydantic model
 
     Raises:
-        ValueError: If the agent output cannot be parsed into a QueryPlan
+        ValueError: If the agent output cannot be parsed
     """
     user_message = question
     if extra_context:
@@ -175,6 +195,11 @@ async def generate_query_plan(
                 plan_data = _extract_json_from_files(files, "sql")
                 if plan_data is None:
                     raise
+
+        # PR5: check if the planner returned a clarification instead of SQL.
+        clarification = _maybe_build_clarification(plan_data)
+        if clarification is not None:
+            return clarification
         return _build_query_plan(plan_data, question)
 
     except Exception as e:
@@ -348,11 +373,39 @@ def _extract_json_plan(content: str, required_key: str = "sql") -> dict:
     )
 
 
+def _maybe_build_clarification(data: dict) -> "Clarification | None":
+    """Check if the planner returned a clarification instead of SQL.
+
+    The structured output has flat optional clarification fields
+    (clarification_question, clarification_options, clarification_kind).
+    When clarification_question is set and sql is absent, it's a clarification.
+    Also handles the fast-path JSON shape: {"clarification": {...}}.
+    """
+    # Structured output shape from the deepagents orchestrator.
+    clar_q = data.get("clarification_question")
+    sql = (data.get("sql") or "").strip()
+    if clar_q and not sql:
+        return Clarification(
+            question=clar_q,
+            options=data.get("clarification_options", []),
+            kind=data.get("clarification_kind", "ambiguous"),
+        )
+    # Fast-path JSON shape: {"clarification": {"question": ..., ...}}
+    clar_dict = data.get("clarification")
+    if isinstance(clar_dict, dict) and clar_dict.get("question") and not sql:
+        return Clarification(
+            question=clar_dict["question"],
+            options=clar_dict.get("options", []),
+            kind=clar_dict.get("kind", "ambiguous"),
+        )
+    return None
+
+
 def _build_query_plan(data: dict, question: str) -> QueryPlan:
     """Build and validate a QueryPlan from the extracted JSON data."""
-    sql = data.get("sql", "").strip()
+    sql = (data.get("sql") or "").strip()
     if not sql:
-        raise ValueError("Agent plan contains no SQL")
+        raise ValueError("Agent plan contains no SQL and no clarification question")
 
     steps = []
     for i, s in enumerate(data.get("steps", []), 1):
@@ -374,3 +427,4 @@ def _build_query_plan(data: dict, question: str) -> QueryPlan:
         confidence=confidence,
         explanation=data.get("explanation", ""),
     )
+

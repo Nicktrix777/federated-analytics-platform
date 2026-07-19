@@ -9,22 +9,44 @@ import json
 import logging
 from openai import AsyncOpenAI
 
-from models import QueryPlan, QueryStep
+from models import Clarification, QueryPlan, QueryStep
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIProvider:
-    def __init__(self, api_key: str, model: str, max_retries: int = 5, timeout: float = 30.0):
+    """OpenAI-COMPATIBLE provider.
+
+    Despite the name this talks to any OpenAI-compatible endpoint via `base_url`
+    — real OpenAI (base_url=None), Google Gemini's OpenAI-compat layer, Groq,
+    OpenRouter, a local Ollama/vLLM, etc. The wire format is identical; only the
+    base_url, api_key, and model ids change. This is what makes the custom
+    single-shot path (fast plan, widget SQL, repair) and embeddings model-agnostic.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_retries: int = 5,
+        timeout: float = 30.0,
+        base_url: str | None = None,
+    ):
         # The OpenAI SDK retries 429/5xx internally with exponential backoff
         # up to max_retries — this is what actually protects the fast path
-        # from rate-limit errors surfacing to the caller.
-        self.client = AsyncOpenAI(api_key=api_key, max_retries=max_retries, timeout=timeout)
+        # from rate-limit errors surfacing to the caller. base_url=None uses
+        # api.openai.com; set it to point at any OpenAI-compatible provider.
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            max_retries=max_retries,
+            timeout=timeout,
+            base_url=base_url or None,
+        )
         self.model = model
 
     async def generate_plan(
         self, system_prompt: str, user_prompt: str, question: str
-    ) -> QueryPlan:
+    ) -> "QueryPlan | Clarification":
         logger.info(f"Calling OpenAI model: {self.model}")
 
         response = await self.client.chat.completions.create(
@@ -50,6 +72,15 @@ class OpenAIProvider:
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"OpenAI response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
+            )
+
+        # PR5: check if the model returned a clarification instead of a plan.
+        clar_dict = data.get("clarification")
+        if isinstance(clar_dict, dict) and clar_dict.get("question") and not (data.get("sql") or "").strip():
+            return Clarification(
+                question=clar_dict["question"],
+                options=clar_dict.get("options", []),
+                kind=clar_dict.get("kind", "ambiguous"),
             )
 
         # Parse steps
@@ -145,20 +176,64 @@ class OpenAIProvider:
                 f"OpenAI batch widget response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
             )
 
-    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
-        """Embed a batch of texts with the given OpenAI embeddings model.
+    async def generate_sheets_sql(self, system_prompt: str, user_prompt: str) -> dict:
+        """
+        One-shot batched SQL generation for every sheet in a report.
+
+        Same single-request pattern as generate_widgets_sql — one call writes
+        the SQL (plus per-column Excel formats) for all sheets instead of
+        fanning out one round trip per sheet.
+        """
+        logger.info(f"Calling OpenAI model for batched sheet SQL: {self.model}")
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=8000,  # up to 6 sheets' worth of SQL + column formats in one response
+        )
+
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("OpenAI returned empty response for sheet SQL batch")
+
+        try:
+            return json.loads(raw_content)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"OpenAI batch sheet response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
+            )
+
+    async def embed(
+        self, texts: list[str], model: str, dimensions: int | None = None
+    ) -> list[list[float]]:
+        """Embed a batch of texts with the given embeddings model.
 
         Returns one vector (list[float]) per input text, in order. Used by the
         schema-RAG index (dataset text → vector) and per-question retrieval
         (question → vector). Batched in one request — the embeddings endpoint
         accepts a list of inputs, so a full-catalog reindex is a single call.
+
+        `dimensions` requests a specific output size (supported by OpenAI
+        text-embedding-3-* and Gemini gemini-embedding-001) so the vectors match
+        the fixed-width pgvector column across providers. Omitted when None.
         """
         if not texts:
             return []
-        logger.info(f"Embedding {len(texts)} text(s) with {model}")
-        response = await self.client.embeddings.create(model=model, input=texts)
-        # data is returned in request order, but sort by index defensively.
-        ordered = sorted(response.data, key=lambda d: d.index)
+        logger.info(f"Embedding {len(texts)} text(s) with {model} (dims={dimensions or 'default'})")
+        kwargs: dict = {"model": model, "input": texts}
+        if dimensions:
+            kwargs["dimensions"] = dimensions
+        response = await self.client.embeddings.create(**kwargs)
+        # data is returned in request order. OpenAI sets `index` on each item;
+        # some OpenAI-compatible providers (Gemini) return index=None, so fall
+        # back to the response order (which already matches input order) rather
+        # than crashing on a None-vs-int comparison.
+        ordered = sorted(response.data, key=lambda d: d.index if d.index is not None else 0)
         return [d.embedding for d in ordered]
 
     async def generate_json(self, system_prompt: str, user_prompt: str, max_tokens: int = 4000) -> dict:

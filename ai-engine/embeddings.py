@@ -72,9 +72,11 @@ async def _load_dataset_texts(conn) -> dict[int, tuple[str, str]]:
         """
         SELECT d.id, d.name, d.description,
                dc.column_name, dc.data_type,
-               dc.description AS column_description, dc.sample_values
+               dc.description AS column_description,
+               cp.sample_values
         FROM datasets d
         LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
+        LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
         WHERE d.is_active = true
         ORDER BY d.id, dc.id
         """
@@ -132,7 +134,7 @@ async def reindex_datasets(provider: OpenAIProvider) -> dict:
         if changed:
             ids = list(changed.keys())
             texts = [changed[i][0] for i in ids]
-            vectors = await provider.embed(texts, settings.embedding_model)
+            vectors = await provider.embed(texts, settings.embedding_model, dimensions=settings.embedding_dim)
             await conn.executemany(
                 """
                 INSERT INTO dataset_embeddings (dataset_id, embedding, embed_text, content_hash, model, updated_at)
@@ -182,7 +184,7 @@ async def reindex_examples(provider: OpenAIProvider, limit: int) -> dict:
         if not rows:
             return {"embedded": 0}
 
-        vectors = await provider.embed([r["question"] for r in rows], settings.embedding_model)
+        vectors = await provider.embed([r["question"] for r in rows], settings.embedding_model, dimensions=settings.embedding_dim)
         await conn.executemany(
             """
             INSERT INTO query_example_embeddings (audit_log_id, question, sql_executed, embedding, model)
@@ -204,7 +206,7 @@ async def retrieve_similar_examples(
 ) -> list[dict] | None:
     """Return up to k past successful queries most similar to `question`.
 
-    Each item is {"question", "sql_executed"} — the shape prompt_builder's
+    Each item is {"question", "sql_executed"} — the shape context_bundle's
     few-shot renderer expects. Returns None (not []) when the example index is
     empty/unavailable, so callers can fall back to recency-based few-shots.
     """
@@ -213,7 +215,7 @@ async def retrieve_similar_examples(
             count = await conn.fetchval("SELECT count(*) FROM query_example_embeddings")
             if not count:
                 return None
-            (query_vec,) = await provider.embed([question], settings.embedding_model)
+            (query_vec,) = await provider.embed([question], settings.embedding_model, dimensions=settings.embedding_dim)
             rows = await conn.fetch(
                 """
                 SELECT question, sql_executed
@@ -244,7 +246,7 @@ async def retrieve_relevant_dataset_ids(
             count = await conn.fetchval("SELECT count(*) FROM dataset_embeddings")
             if not count:
                 return None
-            (query_vec,) = await provider.embed([question], settings.embedding_model)
+            (query_vec,) = await provider.embed([question], settings.embedding_model, dimensions=settings.embedding_dim)
             # Cast $1 explicitly — asyncpg can't always infer the param type of
             # the <=> operand ("could not determine data type of parameter $1").
             rows = await conn.fetch(

@@ -2,6 +2,8 @@ import axios from "axios";
 import type {
   QueryResponse,
   HistoryEntry,
+  ConversationSummary,
+  ConversationTurnDTO,
   DatasetMeta,
   DataSource,
   CreateDataSourcePayload,
@@ -13,6 +15,12 @@ import type {
   CreateWidgetPayload,
   UpdateWidgetPayload,
   AIDashboardResponse,
+  Report,
+  ReportSheet,
+  CreateReportPayload,
+  CreateSheetPayload,
+  UpdateSheetPayload,
+  AIReportResponse,
 } from "../types";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -59,6 +67,25 @@ export const api = {
       "/api/metadata/datasets"
     );
     return response.data.datasets;
+  },
+
+  // ── Conversations (PR7 — "Chats" sidebar tab) ──────────────
+  getConversations: async (limit = 30): Promise<ConversationSummary[]> => {
+    const response = await client.get<{
+      conversations: ConversationSummary[];
+      count: number;
+    }>(`/api/conversations?limit=${limit}`);
+    return response.data.conversations;
+  },
+
+  getConversationTurns: async (
+    id: string
+  ): Promise<ConversationTurnDTO[]> => {
+    const response = await client.get<{
+      turns: ConversationTurnDTO[];
+      count: number;
+    }>(`/api/conversations/${id}/turns`);
+    return response.data.turns;
   },
 
 };
@@ -191,5 +218,113 @@ export const dashboardsApi = {
     await client.delete(
       `/api/dashboards/${dashboardId}/widgets/${widgetId}`
     );
+  },
+};
+
+// ── Reports API ───────────────────────────────────────────────
+
+export const reportsApi = {
+  list: async (): Promise<Report[]> => {
+    const response = await client.get<{ reports: Report[] }>("/api/reports");
+    return response.data.reports;
+  },
+
+  create: async (payload: CreateReportPayload): Promise<Report> => {
+    const response = await client.post<Report>("/api/reports", payload);
+    return response.data;
+  },
+
+  // AI: design a full report from a natural-language brief.
+  // The multi-agent pipeline can take a while — allow up to 5 minutes.
+  generate: async (prompt: string): Promise<AIReportResponse> => {
+    const response = await client.post<AIReportResponse>(
+      "/api/reports/generate",
+      { prompt },
+      { timeout: 300000 }
+    );
+    return response.data;
+  },
+
+  // AI: apply a natural-language instruction to an existing report.
+  refine: async (
+    id: number,
+    instruction: string
+  ): Promise<AIReportResponse> => {
+    const response = await client.post<AIReportResponse>(
+      `/api/reports/${id}/refine`,
+      { instruction },
+      { timeout: 300000 }
+    );
+    return response.data;
+  },
+
+  get: async (id: number): Promise<Report> => {
+    const response = await client.get<Report>(`/api/reports/${id}`);
+    return response.data;
+  },
+
+  update: async (
+    id: number,
+    payload: Partial<CreateReportPayload>
+  ): Promise<Report> => {
+    const response = await client.put<Report>(`/api/reports/${id}`, payload);
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
+    await client.delete(`/api/reports/${id}`);
+  },
+
+  // Download the report as a formatted .xlsx. The endpoint needs the auth
+  // header, so a plain <a href> won't do — fetch the bytes as a blob and
+  // trigger the download from an object URL. The exporter runs every
+  // sheet's SQL live under a 360s server deadline — allow a bit more.
+  download: async (id: number): Promise<void> => {
+    const response = await client.get<Blob>(`/api/reports/${id}/download`, {
+      responseType: "blob",
+      timeout: 400000,
+    });
+
+    const disposition = String(
+      response.headers["content-disposition"] ?? ""
+    );
+    const match = /filename="?([^";]+)"?/i.exec(disposition);
+    const filename = match?.[1] || `report-${id}.xlsx`;
+
+    const url = URL.createObjectURL(response.data);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  createSheet: async (
+    reportId: number,
+    payload: CreateSheetPayload
+  ): Promise<ReportSheet> => {
+    const response = await client.post<ReportSheet>(
+      `/api/reports/${reportId}/sheets`,
+      payload
+    );
+    return response.data;
+  },
+
+  updateSheet: async (
+    reportId: number,
+    sheetId: number,
+    payload: UpdateSheetPayload
+  ): Promise<ReportSheet> => {
+    const response = await client.put<ReportSheet>(
+      `/api/reports/${reportId}/sheets/${sheetId}`,
+      payload
+    );
+    return response.data;
+  },
+
+  deleteSheet: async (reportId: number, sheetId: number): Promise<void> => {
+    await client.delete(`/api/reports/${reportId}/sheets/${sheetId}`);
   },
 };

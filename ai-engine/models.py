@@ -9,7 +9,7 @@ The Core API validates this output again before sending to the Query Service.
 """
 
 import re
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 # ──────────────────────────────────────────────────────────────
@@ -23,6 +23,8 @@ class DatasetColumn(BaseModel):
     description: str = ""
     is_joinable: bool = False
     sample_values: str = ""
+    semantic_type: Optional[str] = None
+    pattern: Optional[str] = None
 
 
 class DatasetMeta(BaseModel):
@@ -34,13 +36,28 @@ class DatasetMeta(BaseModel):
     columns: List[DatasetColumn] = []
 
 
+class ChatMessage(BaseModel):
+    """Structured transcript unit — assembled by Core API from conversation_turns.
+
+    The AI Engine renders these to text for prompt injection; it never persists
+    them. The frontend never sends or sees these — it keeps sending
+    {question, mode, conversation_id}.
+    """
+
+    role: str  # "user" | "assistant"
+    kind: str  # "question" | "answer" | "plan" | "clarification"
+    content: str
+    payload: Optional[dict] = None
+
+
 class PlanRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=2000)
     datasets: List[DatasetMeta] = []
-    # Pre-rendered prior turns of the same conversation (Core API builds this
-    # from conversation_turns). Present only for multi-turn follow-ups; injected
-    # into the planner prompt so references like "break that down" resolve.
-    conversation_context: Optional[str] = Field(default=None, max_length=8000)
+    # Structured prior turns of the same conversation (Core API builds these
+    # from conversation_turns). Present only for multi-turn follow-ups; the
+    # AI Engine renders them to text and injects into the planner prompt so
+    # references like "break that down" resolve.
+    messages: List[ChatMessage] = Field(default_factory=list, max_length=24)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -92,6 +109,52 @@ class QueryPlan(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
+# Clarification (PR5) — alternative terminal outcome of /api/plan
+# ──────────────────────────────────────────────────────────────
+
+CLARIFICATION_KINDS = {
+    "ambiguous_entity",
+    "unresolved_value",
+    "missing_data",
+    "repair_exhausted",
+    "ambiguous",
+}
+
+
+class Clarification(BaseModel):
+    """The pipeline wants to ask the user a question instead of guessing.
+
+    Clarifications are terminal — the AI Engine returns one instead of a
+    QueryPlan, the Core API records it as a clarification turn, and the
+    frontend renders it as a card with option buttons.
+    """
+
+    question: str
+    options: List[str] = Field(default_factory=list)
+    kind: str = "ambiguous"
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str) -> str:
+        if v not in CLARIFICATION_KINDS:
+            return "ambiguous"  # graceful fallback for unknown kinds
+        return v
+
+
+class PlanOutcome(BaseModel):
+    """Envelope for /api/plan — exactly one of plan or clarification is set.
+
+    The Core API inspects this to decide whether to execute SQL or record a
+    clarification turn. The frontend never sees this directly — the Core API
+    re-emits the clarification as its own terminal SSE event.
+    """
+
+    plan: Optional[QueryPlan] = None
+    clarification: Optional[Clarification] = None
+    path: str = "full"
+
+
+# ──────────────────────────────────────────────────────────────
 # Dashboard Planning (input from Core API, output back to it)
 # ──────────────────────────────────────────────────────────────
 
@@ -136,6 +199,61 @@ class DashboardPlan(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────
+# Report Planning (input from Core API, output back to it)
+# ──────────────────────────────────────────────────────────────
+
+# Shared column-format vocabulary — the Go Excel exporter maps these to number
+# formats; anything else renders as plain text (see docs/reports spec).
+ALLOWED_COLUMN_FORMATS = {"text", "integer", "number", "currency", "percent", "date", "datetime"}
+
+
+class ReportPlanRequest(BaseModel):
+    """A natural-language report brief (generate) or instruction (refine)."""
+
+    prompt: str = Field(..., min_length=3, max_length=2000)
+    datasets: List[DatasetMeta] = []
+    # Present only when refining: the report as it exists right now
+    # (name, description, sheets with title/description/sql/column_formats/position).
+    current_report: Optional[dict] = None
+
+
+class SheetPlan(BaseModel):
+    title: str
+    description: str = ""
+    sql: str = Field(..., description="Trino-compatible SQL SELECT statement")
+    # {column alias: format} — keys match the sheet's SELECT list verbatim.
+    column_formats: dict = Field(default_factory=dict)
+    position: int = 0
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+
+    @field_validator("column_formats")
+    @classmethod
+    def normalize_column_formats(cls, v: dict) -> dict:
+        # Drop entries outside the shared vocabulary instead of failing the
+        # sheet — the Excel exporter falls back to value sniffing for any
+        # column without a format.
+        cleaned = {}
+        for col, fmt in (v or {}).items():
+            fmt = fmt.strip().lower() if isinstance(fmt, str) else ""
+            if fmt in ALLOWED_COLUMN_FORMATS:
+                cleaned[col] = fmt
+        return cleaned
+
+
+class ReportPlan(BaseModel):
+    """
+    A full report proposal. Like DashboardPlan this is a DATA structure only —
+    the Core API validates every sheet's SQL again and does all persistence.
+    """
+
+    name: str
+    description: str = ""
+    sheets: List[SheetPlan]
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    explanation: str = ""
+
+
+# ──────────────────────────────────────────────────────────────
 # Widget SQL Repair (input from Core API, output back to it)
 # ──────────────────────────────────────────────────────────────
 
@@ -157,6 +275,9 @@ class RepairWidgetRequest(BaseModel):
     chart_type: str = "table"
     title: str = ""
     datasets: List[DatasetMeta] = []
+    # "error": SQL failed to execute — correct the SQL.
+    # "zero_rows": SQL ran fine but returned no rows — correct filter literals.
+    mode: Literal["error", "zero_rows"] = "error"
 
 
 class RepairWidgetResponse(BaseModel):

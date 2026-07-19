@@ -1,39 +1,54 @@
 /* ============================================================
-   FederateIQ — Design System v2
-   Dark mode: deep navy bg, warm white text, coral accent
-   Sharp edges (0–6px), Claude-level minimalism
+   FederateIQ — Design System v3
+   True-black surface, single coral accent, sharp edges.
+   Data (charts) use a coral monochrome ramp; only genuine status
+   (success / error / warning) keeps semantic color.
    ============================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ── Design Tokens ─────────────────────────────────────────── */
 :root {
-  /* Backgrounds */
-  --bg-base:    #0e0f11;
-  --bg-surface: #161718;
-  --bg-card:    #1c1d20;
-  --bg-raised:  #222427;
-  --bg-input:   #18191c;
-  --bg-code:    #111214;
+  /* Backgrounds — true black, subtle elevation steps */
+  --bg-base:    #000000;
+  --bg-surface: #0a0a0b;
+  --bg-card:    #101012;
+  --bg-raised:  #17171a;
+  --bg-input:   #0c0c0e;
+  --bg-code:    #060607;
 
-  /* Accent — warm coral (same as before, just on dark) */
+  /* Accent — the single brand color: warm coral */
   --accent:         #d4816a;
-  --accent-bright:  #e8967e;
+  --accent-bright:  #eb9c83;
   --accent-dim:     rgba(212, 129, 106, 0.12);
-  --accent-border:  rgba(212, 129, 106, 0.28);
+  --accent-border:  rgba(212, 129, 106, 0.30);
+  --accent-glow:    rgba(212, 129, 106, 0.22);
+
+  /* Coral monochrome ramp — for multi-series charts / data viz */
+  --ramp-1: #f4c2b1;
+  --ramp-2: #eb9c83;
+  --ramp-3: #d4816a;
+  --ramp-4: #b5674f;
+  --ramp-5: #8f4d39;
+  --ramp-6: #6b3829;
 
   /* Text */
-  --text-primary:   #f0ede8;
-  --text-secondary: #a09890;
+  --text-primary:   #f2efea;
+  --text-secondary: #a8a099;
   --text-muted:     #6b6560;
-  --text-faint:     #3f3c3a;
+  --text-faint:     #403d3a;
 
   /* Borders */
-  --border:        rgba(255, 255, 255, 0.06);
+  --border:        rgba(255, 255, 255, 0.055);
   --border-md:     rgba(255, 255, 255, 0.10);
-  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-strong: rgba(255, 255, 255, 0.20);
+  /* Aliases used by the v2/v3 page components (previously undefined → borders
+     silently didn't render; defining them here makes those surfaces visible). */
+  --border-subtle:  rgba(255, 255, 255, 0.055);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-raised:  rgba(255, 255, 255, 0.20);
 
-  /* Status */
+  /* Status — semantic only (kept; not part of the single-color chrome) */
   --green:  #4ade80;
   --red:    #f87171;
   --amber:  #fbbf24;
@@ -1516,3 +1531,317 @@ kbd {
 }
 
 .ai-timeline-duration { color: var(--text-secondary); }
+
+/* ── Clarification Card (PR5) ──────────────────────────────── */
+.clarification-card {
+  background: var(--bg-card);
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  padding: 28px 24px;
+  margin: 16px 0;
+  text-align: center;
+  animation: clarification-slide-in 0.35s ease-out;
+}
+
+@keyframes clarification-slide-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.clarification-icon {
+  font-size: 32px;
+  margin-bottom: 12px;
+}
+
+.clarification-question {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0 0 20px;
+  line-height: 1.5;
+}
+
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.clarification-option-btn {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  color: var(--accent-bright);
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.clarification-option-btn:hover {
+  background: var(--accent);
+  color: var(--bg-base);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(212, 129, 106, 0.3);
+}
+
+.clarification-option-btn:active {
+  transform: translateY(0);
+}
+
+.clarification-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* ============================================================
+   PR7 — Transcript chat UX
+   ============================================================ */
+
+/* The query page becomes a bounded chat frame: transcript scrolls, the
+   composer stays docked at the bottom. Scoped via :has() so the other
+   routes (dashboards, data sources) keep their normal document scroll. */
+.page-content { display: flex; flex-direction: column; min-height: 0; }
+.app-shell:has(.main-content--chat) { height: 100vh; overflow: hidden; }
+
+.main-content--chat {
+  padding: 0;
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  scroll-behavior: smooth;
+}
+
+.chat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  animation: fade-in 0.25s ease;
+}
+
+/* User message — right-aligned coral-tinted bubble */
+.chat-bubble--user {
+  align-self: flex-end;
+  max-width: 80%;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px 10px 2px 10px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  color: var(--text-primary);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.chat-answer-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.chat-bubble-text { white-space: pre-wrap; word-break: break-word; }
+
+/* Assistant-side content (timeline, plan, results, clarification) is
+   left-aligned and full width beneath the user bubble. */
+.chat-turn .results-container,
+.chat-turn .ai-progress-card,
+.chat-turn .clarification-card,
+.chat-turn .chat-error {
+  align-self: stretch;
+}
+
+.results-container { display: flex; flex-direction: column; gap: var(--space-md); }
+
+.results-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  padding: 0 2px;
+}
+
+.transcript-hydrated-note {
+  padding: 10px 14px;
+  border: 1px dashed var(--border-md);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* Error rendered as an agent message inside the turn */
+.chat-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: rgba(248,113,113,0.06);
+  border: 1px solid rgba(248,113,113,0.22);
+  border-radius: var(--radius-md);
+}
+.chat-error .error-icon { color: var(--red); font-size: 14px; }
+.chat-error strong { color: var(--red); font-size: 12.5px; display: block; margin-bottom: 2px; }
+.chat-error p { font-size: 11.5px; color: var(--text-secondary); font-family: var(--font-mono); word-break: break-word; }
+
+.clarification-card--answered {
+  opacity: 0.6;
+  border-color: var(--border-md);
+}
+.clarification-card--answered .clarification-option-btn { cursor: default; }
+
+/* Composer docked at the bottom of the chat frame */
+.composer-dock {
+  flex-shrink: 0;
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.composer-dock .query-input-card { max-width: 960px; margin: 0 auto; }
+
+/* Empty-thread welcome */
+.chat-welcome {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: var(--space-sm);
+  padding: var(--space-2xl);
+  animation: fade-in 0.4s ease;
+}
+.chat-welcome-mark {
+  font-size: 34px;
+  color: var(--accent);
+  margin-bottom: var(--space-sm);
+  animation: pulse-dot 3s infinite;
+}
+.chat-welcome h2 { font-size: 22px; font-weight: 700; letter-spacing: -0.4px; color: var(--text-primary); }
+.chat-welcome p { font-size: 13.5px; color: var(--text-muted); max-width: 440px; line-height: 1.6; }
+
+/* ── Sidebar: Chats tab ─────────────────────────────────────── */
+.sidebar-tab-count {
+  margin-left: 5px;
+  font-size: 9px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0 4px;
+  color: var(--text-muted);
+}
+
+.new-chat-btn {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  margin-bottom: var(--space-xs);
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 11.5px; font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.new-chat-btn:hover {
+  background: var(--accent);
+  color: var(--bg-base);
+  transform: translateY(-1px);
+}
+.new-chat-btn span { font-size: 13px; line-height: 1; }
+
+.chat-item-title {
+  font-size: 12px; font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1; min-width: 0;
+}
+
+/* ============================================================
+   v3 UX polish — single-color chrome + button hover motion
+   ============================================================ */
+
+/* Neutralize decorative categorical color: schema type badges and source
+   badges become coral-tinted / neutral so the UI reads as one accent.
+   (Genuine status colors — success/error/warning — are untouched.) */
+.schema-column-type--varchar, .schema-column-type--text,
+.schema-column-type--bigint, .schema-column-type--integer, .schema-column-type--double,
+.schema-column-type--date, .schema-column-type--timestamp,
+.schema-column-type--boolean, .schema-column-type--other {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+}
+.source-badge--postgresql .source-badge-dot,
+.source-badge--mongodb .source-badge-dot { background: var(--accent); }
+
+.schema-dataset-badge--postgresql,
+.schema-dataset-badge--mongodb {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+.ds-badge-postgresql, .ds-badge-mongodb, .ds-badge-elasticsearch,
+.ds-badge-mysql, .ds-badge-trino {
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+}
+.badge--sql { background: var(--accent-dim); color: var(--accent); border-color: var(--accent-border); }
+.history-mode-badge--sql { background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent-border); }
+.ds-highlight, .db-builder-title, .widget-number-value { color: var(--accent-bright); }
+
+/* Button hover motion — subtle lift + coral edge, consistent across the app. */
+.btn:hover:not(:disabled),
+.submit-btn:hover:not(:disabled),
+.welcome-action-btn:hover,
+.header-btn:hover,
+.source-type-btn:hover,
+.chart-type-btn:hover,
+.example-chip:hover {
+  transform: translateY(-1px);
+}
+.btn:active:not(:disabled),
+.submit-btn:active:not(:disabled),
+.header-btn:active { transform: translateY(0); }
+
+.submit-btn:hover:not(:disabled) {
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.header-btn--primary:hover {
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+/* Cards lift a touch on hover for depth on the true-black surface. */
+.dl-card:hover, .ds-card:hover { box-shadow: 0 6px 20px rgba(0,0,0,0.5); }

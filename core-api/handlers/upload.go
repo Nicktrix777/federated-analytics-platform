@@ -14,16 +14,17 @@ import (
 const maxUploadSize = 20 << 20 // 20 MB
 
 // UploadHandler handles CSV/Excel file uploads.
-// Flow: receive file → parse → create PG table → register metadata → invalidate AI cache
+// Flow: receive file → parse → create PG table → register metadata.
+// The metadata write bumps metadata_state.version (via DB triggers on
+// datasets/dataset_columns), so the AI Engine's watcher picks up the new table
+// on its own — no explicit cache poke here.
 type UploadHandler struct {
 	uploadSvc *services.UploadService
-	aiClient  *services.AIClient
 }
 
-func NewUploadHandler(uploadSvc *services.UploadService, aiClient *services.AIClient) *UploadHandler {
+func NewUploadHandler(uploadSvc *services.UploadService) *UploadHandler {
 	return &UploadHandler{
 		uploadSvc: uploadSvc,
-		aiClient:  aiClient,
 	}
 }
 
@@ -71,8 +72,6 @@ func (h *UploadHandler) HandleUpload(c *gin.Context) {
 			})
 			return
 		}
-		// Invalidate AI engine cache so new table appears immediately
-		h.aiClient.InvalidateCache()
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": fmt.Sprintf("Successfully uploaded '%s': %d rows, %d columns", filename, result.RowCount, len(result.Columns)),
@@ -90,9 +89,6 @@ func (h *UploadHandler) HandleUpload(c *gin.Context) {
 		})
 		return
 	}
-
-	// Invalidate AI engine cache so new table appears in the next NL query
-	h.aiClient.InvalidateCache()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
