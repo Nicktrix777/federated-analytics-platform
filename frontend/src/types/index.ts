@@ -343,3 +343,30 @@ export interface UpdateSheetPayload {
   position?: number;
   max_rows?: number;
 }
+
+// ── LLM Settings (runtime-editable, non-secret) ───────────────
+// Every model field is a provider-prefixed string, e.g. "openai:gpt-4o",
+// "anthropic:claude-sonnet-5", "google_genai:gemini-flash-latest". API keys are
+// NOT part of this — they stay in the AI Engine's environment.
+export interface LLMSettingsConfig {
+  llm_model: string;
+  sql_generator_model: string;
+  schema_analyst_model: string;
+  fast_path_model: string;
+  dashboard_widget_sql_model: string;
+  embedding_model: string;
+  llm_base_url: string;
+  fast_path_enabled: boolean;
+  fast_path_confidence_threshold: number;
+  llm_frontier_rpm: number;
+  llm_fast_rpm: number;
+  llm_embed_rpm: number;
+}
+
+export interface LLMSettingsResponse {
+  config: LLMSettingsConfig;
+  // Which provider API keys are configured (booleans only — never the values).
+  provider_keys_present: Record<string, boolean>;
+  known_providers: string[];
+  version: number | null;
+}

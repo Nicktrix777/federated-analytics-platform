@@ -36,16 +36,18 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", description="Anthropic API key — deepagents anthropic: path")
     openai_api_key: str = Field(default="", description="OpenAI API key — deepagents openai: path / real-OpenAI custom providers")
 
-    # Custom OpenAI-compatible provider (fast path, widget SQL, repair, embeddings).
-    # base_url blank → real api.openai.com. For Gemini free tier, set it to
-    # https://generativelanguage.googleapis.com/v1beta/openai/ and use the Gemini key.
+    # Endpoint + key for the `openai_compat:` and `ollama:` provider prefixes
+    # ONLY (a generic self-hosted / OpenAI-compatible gateway or local runtime).
+    # These are NO LONGER a global default for the custom path — every model
+    # string now carries a provider prefix, and the prefix decides the endpoint
+    # and key (see llm/providers.py). Leave blank unless you use openai_compat/ollama.
     llm_base_url: str = Field(
-        default="https://generativelanguage.googleapis.com/v1beta/openai/",
-        description="OpenAI-compatible base URL for the custom providers + embeddings (blank = real OpenAI)",
+        default="",
+        description="Base URL for the openai_compat:/ollama: providers (blank = api.openai.com for openai_compat)",
     )
     llm_api_key: str = Field(
         default="",
-        description="API key for the OpenAI-compatible custom providers; falls back to google_api_key then openai_api_key",
+        description="API key for the openai_compat:/ollama: providers",
     )
 
     # PostgreSQL metadata DB
@@ -70,13 +72,13 @@ class Settings(BaseSettings):
         description="Try a single-shot LLM call for simple questions before the full deepagents pipeline",
     )
     fast_path_model: str = Field(
-        default="gemini-flash-lite-latest",
+        default="google_genai:gemini-flash-lite-latest",
         description=(
-            "Plain model id (NO provider prefix) for the fast-path single-shot "
-            "attempt, sent via the OpenAI-compatible custom provider. Cheap tier "
-            "— high-volume, latency-sensitive. Escalates to the full deepagents "
-            "pipeline when rejected/low-confidence. (e.g. gemini-flash-lite-latest, "
-            "gpt-4o-mini, llama-3.3-70b-versatile)."
+            "Provider-prefixed model string for the fast-path single-shot attempt "
+            "(custom path). Cheap tier — high-volume, latency-sensitive; escalates "
+            "to the full deepagents pipeline when rejected/low-confidence. "
+            "(e.g. openai:gpt-4o-mini, anthropic:claude-haiku-4-5, "
+            "google_genai:gemini-flash-lite-latest)."
         ),
     )
     fast_path_confidence_threshold: float = Field(
@@ -92,6 +94,25 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(
         default=60.0,
         description="Per-call timeout (seconds) for LLM requests",
+    )
+
+    # ── Per-tier rate limits (requests per minute; 0 = unlimited) ────────
+    # A token-bucket limiter per tier, shared across BOTH LLM paths (deepagents
+    # + custom single-shot), so load is managed by config instead of code. This
+    # complements the SDK's 429 retry (reactive) by proactively pacing calls.
+    # NOTE: limiters are per-tier, not per-API-key — if two tiers use the same
+    # provider key, set their RPMs to sum under that provider's real quota.
+    llm_frontier_rpm: int = Field(
+        default=0,
+        description="RPM cap for the frontier tier (llm_model, sql_generator_model, dashboard_widget_sql_model). 0 = unlimited.",
+    )
+    llm_fast_rpm: int = Field(
+        default=0,
+        description="RPM cap for the cheap/fast tier (fast_path_model, schema_analyst_model). 0 = unlimited.",
+    )
+    llm_embed_rpm: int = Field(
+        default=0,
+        description="RPM cap for embedding calls (embedding_model). 0 = unlimited.",
     )
 
     # ── Concurrency control (Phase 1) ────────────────────────
@@ -157,10 +178,13 @@ class Settings(BaseSettings):
         description="Filter the prompt schema context to the datasets most relevant to the question (pgvector)",
     )
     embedding_model: str = Field(
-        default="gemini-embedding-001",
+        default="google_genai:gemini-embedding-001",
         description=(
-            "Embeddings model for dataset/question vectors, via the OpenAI-compatible "
-            "custom provider. gemini-embedding-001 supports a configurable output "
+            "Provider-prefixed embeddings model for dataset/question vectors (custom "
+            "path). May use a DIFFERENT provider than reasoning — e.g. anthropic: has "
+            "no embeddings API, so pair Claude reasoning with openai:text-embedding-3-small "
+            "or google_genai:gemini-embedding-001. "
+            "gemini-embedding-001 supports a configurable output "
             "dimension, so we request embedding_dim (1536) to match the pgvector "
             "column without a migration. (OpenAI equivalent: text-embedding-3-small.) "
             "If the endpoint ignores the dimension request the vectors won't match and "
@@ -210,11 +234,12 @@ class Settings(BaseSettings):
         ),
     )
     dashboard_widget_sql_model: str = Field(
-        default="gemini-flash-latest",
+        default="google_genai:gemini-flash-latest",
         description=(
-            "Plain model id (NO provider prefix) for the batched per-dashboard "
-            "widget-SQL call and widget-SQL repair, sent via the OpenAI-compatible "
-            "custom provider — same reasoning-quality tradeoff as sql_generator_model."
+            "Provider-prefixed model string for the batched per-dashboard widget-SQL "
+            "call, batched report-sheet SQL, and SQL repair (custom path) — same "
+            "reasoning-quality tradeoff as sql_generator_model. "
+            "(e.g. openai:gpt-4o, anthropic:claude-sonnet-5)."
         ),
     )
 

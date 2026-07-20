@@ -67,8 +67,23 @@ from context_bundle import (
 )
 from events import EventEmitter, NullEmitter
 from llm.openai_provider import OpenAIProvider
+from llm.anthropic_provider import AnthropicProvider
+from llm.providers import build_tier_limiters, make_custom_provider
+from llm_settings import (
+    SettingsValidationError,
+    apply_config_overlay,
+    effective_config,
+    get_llm_settings_version,
+    known_providers,
+    provider_keys_present,
+    read_llm_settings_config,
+    write_llm_settings_config,
+)
 from embeddings import reindex_examples
 from enrichment import watch_metadata_version
+
+# A custom single-shot provider is either OpenAI-compatible or Anthropic.
+CustomProvider = OpenAIProvider | AnthropicProvider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,8 +101,8 @@ _report_agent = None
 # The Async client inside it keeps a persistent connection pool to the LLM
 # API — constructing it per request forced a fresh TCP+TLS handshake each time,
 # which alone added several hundred ms per plan. Cheap tier — high-volume,
-# single-shot plan attempts. OpenAI-compatible (Gemini by default).
-_fast_provider: Optional[OpenAIProvider] = None
+# single-shot plan attempts. Provider is derived from fast_path_model's prefix.
+_fast_provider: Optional[CustomProvider] = None
 
 # Separate provider (frontier tier) for widget SQL work — the batched
 # per-dashboard widget-SQL call and widget-SQL repair. This is the one step
@@ -95,14 +110,15 @@ _fast_provider: Optional[OpenAIProvider] = None
 # a nested row type); the cheap tier measurably produced invalid SQL on deeply
 # nested array fields, so it stays on the frontier tier even though
 # fast-path/schema-analyst use the cheaper tier.
-_widget_sql_provider: Optional[OpenAIProvider] = None
+_widget_sql_provider: Optional[CustomProvider] = None
 
-# Embeddings provider (schema-RAG / few-shot RAG). Same OpenAI-compatible
-# endpoint as the reasoning providers; the embedding model id is passed per
-# call. If embeddings fail (no key/credit, or an output-dimension mismatch with
-# the pgvector column) RAG degrades gracefully to the full catalog + recency
+# Embeddings provider (schema-RAG / few-shot RAG). Derived from embedding_model's
+# prefix — MAY be a different provider than the reasoning models (e.g. OpenAI
+# embeddings alongside Claude reasoning, since Anthropic has no embeddings API).
+# If embeddings are unavailable (no key/credit, or an output-dimension mismatch
+# with the pgvector column) RAG degrades gracefully to the full catalog + recency
 # few-shots (see enrichment.run_enrichment_pipeline / embeddings.retrieve_*).
-_embed_provider: Optional[OpenAIProvider] = None
+_embed_provider: Optional[CustomProvider] = None
 
 # Caps how many /api/plan pipelines (fast or full) run at once so bursts of
 # concurrent requests don't all hit OpenAI's rate limits simultaneously.
@@ -123,6 +139,10 @@ def _spawn_stream_task(coro) -> None:
 # Background metadata-version watcher (Step 1b). Held as a module global so
 # lifespan can cancel it cleanly on shutdown. See enrichment.watch_metadata_version.
 _watcher_task: Optional[asyncio.Task] = None
+
+# Background llm_settings-version watcher — hot-reloads the provider/agent stack
+# when the UI settings change. Cancelled on shutdown alongside _watcher_task.
+_settings_watcher_task: Optional[asyncio.Task] = None
 
 
 # Serializes background example-reindex runs so per-request opportunistic
@@ -149,70 +169,118 @@ async def _reindex_examples_safe() -> None:
             logger.warning(f"Example embedding reindex failed (few-shots will use recency): {e}")
 
 
+# Guards a rebuild of the LLM stack (providers + agents) so an in-flight request
+# never observes a half-swapped set of globals — see _build_llm_stack / Part B reload.
+_llm_reload_lock = asyncio.Lock()
+
+
+def _export_provider_keys() -> None:
+    """Export provider keys to the environment so LangChain's native integrations
+    (openai/anthropic/google_genai) pick them up. The deepagents path resolves the
+    client from the model-string prefix and reads the matching env key."""
+    if settings.google_api_key:
+        os.environ["GOOGLE_API_KEY"] = settings.google_api_key
+    if settings.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    if settings.anthropic_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+
+
+def _build_llm_stack() -> None:
+    """(Re)build tier limiters, custom single-shot providers, and the three
+    deepagents into the module globals from the CURRENT settings.
+
+    Called once at startup and again on a live settings change (Part B hot-reload).
+    Provider + endpoint + key for EVERY call derive from each model string's
+    provider prefix via llm/providers.py — there is no Gemini/base_url default, so
+    switching providers is a config-only change. A custom provider is disabled
+    (set to None, logged) when its required cloud key is missing, which degrades
+    only that feature (e.g. no embeddings key → RAG falls back to full catalog).
+    """
+    global _agent, _dashboard_agent, _report_agent
+    global _fast_provider, _widget_sql_provider, _embed_provider
+
+    _export_provider_keys()
+    limiters = build_tier_limiters()
+
+    # Custom single-shot path (fast plan / widget+sheet SQL / repair / embeddings).
+    _fast_provider = make_custom_provider(settings.fast_path_model, limiters["fast"])
+    _widget_sql_provider = make_custom_provider(settings.dashboard_widget_sql_model, limiters["frontier"])
+    _embed_provider = make_custom_provider(settings.embedding_model, limiters["embed"])
+
+    # deepagents path (orchestrator + designers + subagents), with per-tier limiters.
+    _agent = create_query_planner(model=settings.llm_model, limiters=limiters)
+    _dashboard_agent = create_dashboard_designer(model=settings.llm_model, limiters=limiters)
+    _report_agent = create_report_designer(model=settings.llm_model, limiters=limiters)
+
+    logger.info(
+        "LLM stack ready — deepagents=%s | fast=%s | widget/sheet=%s | embed=%s | "
+        "rpm(frontier/fast/embed)=%s/%s/%s",
+        settings.llm_model,
+        settings.fast_path_model if _fast_provider else "DISABLED(no key)",
+        settings.dashboard_widget_sql_model if _widget_sql_provider else "DISABLED(no key)",
+        settings.embedding_model if _embed_provider else "DISABLED(no key)",
+        settings.llm_frontier_rpm, settings.llm_fast_rpm, settings.llm_embed_rpm,
+    )
+
+
+async def _reload_llm_stack_from_db() -> None:
+    """Re-read the DB config overlay and rebuild the whole LLM stack, atomically.
+
+    Under _llm_reload_lock so an in-flight request never observes a half-swapped
+    set of globals — a request that already captured the old provider/agent ref
+    finishes on it; the next request picks up the new one.
+    """
+    async with _llm_reload_lock:
+        apply_config_overlay(await read_llm_settings_config())
+        _build_llm_stack()
+
+
+async def watch_llm_settings_version() -> None:
+    """Poll llm_settings.version; on change, hot-reload the LLM stack.
+
+    Mirrors watch_metadata_version but for the (cheap) provider/agent rebuild —
+    it does NOT touch the RAG indexes, so switching provider/model/RPM from the
+    UI takes effect within one poll interval without a container restart. The
+    first iteration is a no-op (startup already built the stack via the overlay).
+    Cancelled cleanly on shutdown.
+    """
+    poll = settings.metadata_version_poll_seconds
+    last_version = await get_llm_settings_version()
+    while True:
+        try:
+            version = await get_llm_settings_version()
+            if version is not None and version != last_version:
+                logger.info("LLM settings changed (version=%s) — hot-reloading stack", version)
+                await _reload_llm_stack_from_db()
+                last_version = version
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"llm_settings watcher iteration failed: {e}")
+        await asyncio.sleep(poll)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _agent, _dashboard_agent, _report_agent, _fast_provider, _widget_sql_provider, _embed_provider, _watcher_task
+    global _watcher_task, _settings_watcher_task, _agent, _dashboard_agent, _report_agent
     try:
-        # ── deepagents (langchain) path: export whatever provider keys are set.
-        # init_chat_model picks the client from the model-string prefix
-        # (google_genai: / openai: / anthropic:) and reads the matching env key.
-        if settings.google_api_key:
-            os.environ["GOOGLE_API_KEY"] = settings.google_api_key
-        if settings.openai_api_key:
-            os.environ["OPENAI_API_KEY"] = settings.openai_api_key
-        if settings.anthropic_api_key:
-            os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
-
-        # ── Custom OpenAI-compatible path: fast plan, widget SQL, repair, and
-        # embeddings. One base_url + key drives them all; the model id per call
-        # selects the tier. Provider-neutral — point base_url at Gemini's
-        # OpenAI-compat layer (default), Groq, a local runtime, or real OpenAI.
-        custom_key = settings.llm_api_key or settings.google_api_key or settings.openai_api_key
-        if custom_key:
-            _fast_provider = OpenAIProvider(
-                api_key=custom_key,
-                model=settings.fast_path_model,
-                max_retries=settings.llm_max_retries,
-                timeout=settings.llm_timeout_seconds,
-                base_url=settings.llm_base_url,
-            )
-            _widget_sql_provider = OpenAIProvider(
-                api_key=custom_key,
-                model=settings.dashboard_widget_sql_model,
-                max_retries=settings.llm_max_retries,
-                timeout=settings.llm_timeout_seconds,
-                base_url=settings.llm_base_url,
-            )
-            # Embeddings share the same OpenAI-compatible endpoint. The `model`
-            # attr is unused by embed() (the embedding model id is passed per
-            # call). If embeddings fail (no key/credit, or dimension mismatch)
-            # RAG degrades gracefully to the full catalog + recency few-shots.
-            _embed_provider = OpenAIProvider(
-                api_key=custom_key,
-                model=settings.embedding_model,
-                max_retries=settings.llm_max_retries,
-                timeout=settings.llm_timeout_seconds,
-                base_url=settings.llm_base_url,
-            )
-        else:
-            logger.warning(
-                "No LLM key set (LLM_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY) — "
-                "custom providers disabled; plan/dashboard/repair will return 503. "
-                "Set a provider key in .env to enable AI features."
-            )
-
-        _agent = create_query_planner(model=settings.llm_model)
-        _dashboard_agent = create_dashboard_designer(model=settings.llm_model)
-        _report_agent = create_report_designer(model=settings.llm_model)
-        logger.info(
-            f"Query planner, dashboard designer, and report designer ready (model={settings.llm_model})"
-        )
+        # Apply the DB config overlay (non-secret UI-editable fields) on top of
+        # the env defaults BEFORE building the stack, so a saved config survives
+        # restarts. Empty/absent row → env defaults verbatim.
+        apply_config_overlay(await read_llm_settings_config())
+        _build_llm_stack()
 
         # Start the metadata-version watcher. Its first iteration always runs the
         # enrichment pipeline, which warms the RAG indexes on boot exactly as the
         # old startup reindex did; thereafter it re-runs only when metadata_state
         # .version moves. It supersedes the /api/invalidate-cache poke web.
-        _watcher_task = asyncio.create_task(watch_metadata_version(_embed_provider))
+        # Pass a getter (not the value) so a settings hot-reload that swaps the
+        # embeddings provider is picked up without restarting the watcher.
+        _watcher_task = asyncio.create_task(watch_metadata_version(lambda: _embed_provider))
+        # Hot-reload watcher: applies UI settings changes to the provider/agent
+        # stack live (no restart). Cheap — no RAG re-embedding.
+        _settings_watcher_task = asyncio.create_task(watch_llm_settings_version())
         # Few-shot examples are audit-log-driven (not metadata-driven), so they
         # keep their own opportunistic startup warm rather than riding the watcher.
         if settings.few_shot_rag_enabled:
@@ -223,12 +291,13 @@ async def lifespan(app: FastAPI):
         _dashboard_agent = None
         _report_agent = None
     yield
-    if _watcher_task is not None:
-        _watcher_task.cancel()
-        try:
-            await _watcher_task
-        except asyncio.CancelledError:
-            pass
+    for task in (_watcher_task, _settings_watcher_task):
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     await close_shared_clients()
     logger.info("AI Engine shutting down")
 
@@ -270,6 +339,42 @@ async def health():
         "agent_ready": _agent is not None,
         "fast_path_enabled": settings.fast_path_enabled,
         "fast_path_model": settings.fast_path_model,
+    }
+
+
+# ── LLM settings (runtime-editable, non-secret) ───────────────
+# Internal endpoints — reached only via the Core API proxy (which enforces auth).
+# API keys are NEVER read or written here; they stay in the environment.
+@app.get("/api/llm-settings")
+async def get_llm_settings():
+    """Effective LLM config + which provider keys are set (booleans, not values)."""
+    return {
+        "config": effective_config(),
+        "provider_keys_present": provider_keys_present(),
+        "known_providers": known_providers(),
+        "version": await get_llm_settings_version(),
+    }
+
+
+@app.put("/api/llm-settings")
+async def put_llm_settings(payload: dict):
+    """Validate + persist the editable LLM config, then hot-reload the stack.
+
+    Accepts either the flat editable fields or `{"config": {...}}`. Unknown keys
+    are ignored; a bad value returns 400 and nothing is written. The reload runs
+    inline so the response reflects the newly-applied state.
+    """
+    config = payload.get("config", payload) if isinstance(payload, dict) else {}
+    try:
+        version = await write_llm_settings_config(config)
+    except SettingsValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await _reload_llm_stack_from_db()
+    return {
+        "status": "ok",
+        "version": version,
+        "config": effective_config(),
+        "provider_keys_present": provider_keys_present(),
     }
 
 

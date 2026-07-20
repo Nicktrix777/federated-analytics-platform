@@ -67,6 +67,7 @@ func main() {
 	reportHandler := handlers.NewReportHandler(reportSvc, aiClient, queryClient, cfg.AIEnabled)
 	curationHandler := handlers.NewCurationHandler(curationSvc)
 	conversationsHandler := handlers.NewConversationsHandler(conversationSvc)
+	llmSettingsHandler := handlers.NewLLMSettingsHandler(aiClient, cfg.AIEnabled)
 
 	// ── Router Setup ──────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
@@ -155,6 +156,14 @@ func main() {
 		// TODO(security): uses same static bearer token as all other endpoints;
 		// tighten when real auth lands.
 		api.GET("/curation", curationHandler.HandleList)
+
+		// ── LLM Settings ─────────────────────────────────────
+		// Runtime-editable, non-secret LLM configuration (provider-prefixed
+		// model strings, base_url, fast-path, per-tier RPM). Proxied to the AI
+		// Engine, which validates + hot-reloads. API keys stay in the AI
+		// Engine's environment and are never read/written here.
+		api.GET("/llm-settings", llmSettingsHandler.HandleGet)
+		api.PUT("/llm-settings", llmSettingsHandler.HandleUpdate)
 	}
 
 	// ── HTTP Server with Graceful Shutdown ────────────────────

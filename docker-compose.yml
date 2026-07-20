@@ -173,34 +173,38 @@ services:
       dockerfile: Dockerfile
     container_name: fap-ai-engine
     environment:
-      # Provider-agnostic LLM config. Default: Google Gemini free tier.
-      #   - Set GOOGLE_API_KEY (free from aistudio.google.com) and you're done.
-      #   - To use another provider, change the *_MODEL strings + the base_url/key
-      #     below; no code changes needed.
+      # Provider-agnostic LLM config. Every *_MODEL is a provider-prefixed
+      # string ("openai:gpt-4o", "anthropic:claude-sonnet-5", "google_genai:..");
+      # the prefix decides the endpoint + key. Default: Google Gemini free tier
+      # (set GOOGLE_API_KEY). Switch providers by editing the strings + the key —
+      # no code changes; also editable live from the UI Settings page.
+      # These defaults are overlaid by the DB-stored config at startup, so a
+      # value saved in the UI survives restarts.
       LLM_MODEL: ${LLM_MODEL:-google_genai:gemini-flash-latest}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Custom OpenAI-compatible providers (fast path, widget SQL, repair,
-      # embeddings). Default base_url = Gemini's OpenAI-compat layer; LLM_API_KEY
-      # falls back to GOOGLE_API_KEY in code, so a single Gemini key covers both
-      # the deepagents path and the custom path.
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+      SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-google_genai:gemini-flash-lite-latest}
+      SQL_GENERATOR_MODEL: ${SQL_GENERATOR_MODEL:-google_genai:gemini-flash-latest}
+      # Custom single-shot path (fast plan, dashboard/report SQL, repair, embeddings).
+      FAST_PATH_MODEL: ${FAST_PATH_MODEL:-google_genai:gemini-flash-lite-latest}
+      DASHBOARD_WIDGET_SQL_MODEL: ${DASHBOARD_WIDGET_SQL_MODEL:-google_genai:gemini-flash-latest}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-google_genai:gemini-embedding-001}
+      # Base URL + key for the openai_compat:/ollama: prefixes only (self-hosted).
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-gemini-embedding-001}
-      # Fast path + resilience tuning (documented in .env.example) — must be
-      # forwarded here or the container falls back to code defaults.
+      # Fast path + rate limits (documented in .env.example) — must be forwarded
+      # here or the container falls back to code defaults.
       FAST_PATH_ENABLED: ${FAST_PATH_ENABLED:-true}
-      FAST_PATH_MODEL: ${FAST_PATH_MODEL:-gemini-flash-lite-latest}
       FAST_PATH_CONFIDENCE_THRESHOLD: ${FAST_PATH_CONFIDENCE_THRESHOLD:-0.55}
+      LLM_FRONTIER_RPM: ${LLM_FRONTIER_RPM:-0}
+      LLM_FAST_RPM: ${LLM_FAST_RPM:-0}
+      LLM_EMBED_RPM: ${LLM_EMBED_RPM:-0}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-5}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
       AI_MAX_CONCURRENT_PLANS: ${AI_MAX_CONCURRENT_PLANS:-4}
       AI_QUEUE_TIMEOUT_SECONDS: ${AI_QUEUE_TIMEOUT_SECONDS:-45}
       SCHEMA_TOOL_CACHE_TTL_SECONDS: ${SCHEMA_TOOL_CACHE_TTL_SECONDS:-60}
-      SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-google_genai:gemini-flash-lite-latest}
-      SQL_GENERATOR_MODEL: ${SQL_GENERATOR_MODEL:-google_genai:gemini-flash-latest}
-      DASHBOARD_WIDGET_SQL_MODEL: ${DASHBOARD_WIDGET_SQL_MODEL:-gemini-flash-latest}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta

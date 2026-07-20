@@ -30,6 +30,44 @@ func postJSON(client *http.Client, url, requestID string, payload interface{}) (
 	return client.Do(req)
 }
 
+// requestJSONRaw issues method to url with an optional JSON payload and returns
+// the upstream status code and raw response body. Unlike decodeJSON it does NOT
+// enforce a 200 — a proxy handler relays both status and body verbatim, so an
+// AI-Engine validation 400 (with its detail) reaches the caller unchanged.
+func requestJSONRaw(client *http.Client, method, url, requestID string, payload interface{}) (int, []byte, error) {
+	var bodyReader io.Reader
+	if payload != nil {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if requestID != "" {
+		req.Header.Set("X-Request-ID", requestID)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	return resp.StatusCode, respBytes, nil
+}
+
 // decodeJSON drains and closes resp's body, enforces a 200 status, and
 // unmarshals the body into out. service names the upstream for error messages.
 func decodeJSON(resp *http.Response, service string, out interface{}) error {

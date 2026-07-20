@@ -8,7 +8,7 @@ migrations bought nothing. Transitional backfills from the old chain (0003's
 sample_values copy, 0008's truncation) are gone — they only made sense when
 upgrading a populated database.
 
-It is SCHEMA ONLY — no seed rows except the metadata_state singleton: data
+It is SCHEMA ONLY  no seed rows except the metadata_state singleton: data
 sources, datasets and columns are discovered live from Trino by the Core API's
 catalog sync (SyncCatalogsFromTrino), so seeding them here would only create
 phantom entries that may not match the real sources.
@@ -394,10 +394,34 @@ DROP TRIGGER IF EXISTS bump_metadata_version_value_lookups ON value_lookups;
 CREATE TRIGGER bump_metadata_version_value_lookups
     AFTER INSERT OR UPDATE OR DELETE ON value_lookups
     FOR EACH STATEMENT EXECUTE FUNCTION bump_metadata_version();
+
+-- ── Runtime-editable, non-secret LLM configuration ──────────────────────────
+-- Single-row table holding the UI-editable LLM settings (provider-prefixed
+-- model strings, base_url, fast-path toggle/threshold, per-tier RPM limits).
+-- It does NOT store API keys — those stay in the environment (.env) and are
+-- never written to the DB or sent over HTTP. Same BOOLEAN PK CHECK(id) trick as
+-- metadata_state: exactly one row for the whole deployment.
+--
+-- The AI Engine overlays this row's `config` JSONB onto its env-derived
+-- settings at startup and polls `version` (its own counter, NOT
+-- metadata_state.version — that one triggers expensive re-embedding) to
+-- hot-reload the provider/agent stack on a live change. The PUT
+-- /api/llm-settings handler bumps `version` in the same UPDATE.
+CREATE TABLE IF NOT EXISTS llm_settings (
+    id         BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    config     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    version    BIGINT NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Seed the singleton with an empty config so the first read never sees an empty
+-- table; an empty config means "use the env-derived defaults verbatim".
+INSERT INTO llm_settings (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
 """
 
 
 DOWNGRADE_SQL = r"""
+DROP TABLE IF EXISTS llm_settings;
 DROP TABLE IF EXISTS value_lookups;
 DROP TABLE IF EXISTS report_sheets;
 DROP TABLE IF EXISTS reports;

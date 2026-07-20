@@ -28,12 +28,12 @@ import logging
 from typing import Optional
 
 from deepagents import create_deep_agent
-from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
+from llm.providers import make_langchain_model
 from agents.orchestrator import _extract_json_from_files, _extract_json_plan, _normalize_content, run_agent
 from events import EventEmitter
-from agents.subagents.schema_analyst import SCHEMA_ANALYST_SUBAGENT
+from agents.subagents.schema_analyst import build_schema_analyst_subagent
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
 from agents.tools.schema_tools import list_available_sources
 from config import settings
@@ -121,19 +121,16 @@ data_requirements to what's specific to THAT sheet.
 """
 
 
-def create_report_designer(model: str = "anthropic:claude-sonnet-5") -> object:
+def create_report_designer(model: str = "anthropic:claude-sonnet-5", limiters: dict | None = None) -> object:
     """Create the report designer deepagent."""
-    resolved_model = init_chat_model(
-        model,
-        max_retries=settings.llm_max_retries,
-        timeout=settings.llm_timeout_seconds,
-    )
+    limiters = limiters or {}
+    resolved_model = make_langchain_model(model, limiters.get("frontier"))
     return create_deep_agent(
         model=resolved_model,
         system_prompt=REPORT_DESIGNER_SYSTEM_PROMPT,
         tools=[list_available_sources],
         subagents=[
-            SCHEMA_ANALYST_SUBAGENT,
+            build_schema_analyst_subagent(limiters.get("fast")),
         ],
         response_format=ReportDesign,
     )

@@ -74,8 +74,12 @@ async def run_enrichment_pipeline(provider) -> None:
         logger.warning(f"Schema embedding reindex failed (RAG will use full catalog): {e}")
 
 
-async def watch_metadata_version(provider) -> None:
+async def watch_metadata_version(provider_getter) -> None:
     """Poll metadata_state.version; on change, clear caches + run enrichment.
+
+    `provider_getter` is a zero-arg callable returning the CURRENT embeddings
+    provider (read fresh each run) so a live settings hot-reload that swaps the
+    provider is picked up without restarting the watcher.
 
     This is the whole replacement for the poke web. The first iteration always
     runs the pipeline so startup still warms the RAG indexes exactly as
@@ -117,7 +121,7 @@ async def watch_metadata_version(provider) -> None:
                             f"Running enrichment pipeline (version={version}, "
                             f"reason={'startup warm' if first else 'metadata changed'})"
                         )
-                        await run_enrichment_pipeline(provider)
+                        await run_enrichment_pipeline(provider_getter())
                         # Re-read so bumps during the run are absorbed, not replayed.
                         last_version = await get_metadata_version()
                     last_run_at = time.monotonic()

@@ -17,16 +17,7 @@ from agents.tools.schema_tools import (
     get_source_schema_summary,
 )
 from config import settings
-from langchain.chat_models import init_chat_model
-
-# Resolved with the same retry/timeout settings as the orchestrator's main
-# model — a bare model string here would fall back to langchain's default
-# max_retries (2), undermining the Phase 1 rate-limit resilience work.
-_SCHEMA_ANALYST_MODEL = init_chat_model(
-    settings.schema_analyst_model,
-    max_retries=settings.llm_max_retries,
-    timeout=settings.llm_timeout_seconds,
-)
+from llm.providers import make_langchain_model
 
 SCHEMA_ANALYST_SYSTEM_PROMPT = """You are a Schema Analyst for a Federated Analytics Platform.
 
@@ -62,24 +53,34 @@ Always respond with a structured schema context containing:
 
 Be thorough but concise. The SQL generator will use your output to write precise SQL."""
 
-SCHEMA_ANALYST_SUBAGENT = {
-    "name": "schema-analyst",
-    "description": (
-        "Analyzes the data landscape across all registered sources "
-        "(PostgreSQL, MongoDB, Elasticsearch, etc.) and identifies relevant tables, "
-        "columns, and join relationships for a given question. "
-        "Use this FIRST before generating any SQL."
-    ),
-    "system_prompt": SCHEMA_ANALYST_SYSTEM_PROMPT,
-    # Cheap model — this subagent mostly calls tools and summarizes their
-    # output, it doesn't need frontier-model reasoning like sql-generator does.
-    "model": _SCHEMA_ANALYST_MODEL,
-    # Deliberately small tool surface: one consolidated overview tool plus two
-    # drill-downs. The old six-tool list, paired with a five-step workflow
-    # prompt, made every schema-analyst run cost 5-10 LLM round trips.
-    "tools": [
-        get_schema_context,
-        get_source_schema_summary,
-        get_column_details,
-    ],
-}
+def build_schema_analyst_subagent(rate_limiter=None) -> dict:
+    """Build the schema-analyst subagent definition.
+
+    A builder (not a module constant) so the model is resolved from the CURRENT
+    settings with this tier's rate limiter — lets the deepagents pipeline be
+    rebuilt on a live settings change (Part B hot-reload) and share the 'fast'
+    tier's RPM cap. Uses the same retry/timeout as the orchestrator's model — a
+    bare init_chat_model would fall back to langchain's default max_retries (2),
+    undermining the rate-limit resilience work.
+    """
+    return {
+        "name": "schema-analyst",
+        "description": (
+            "Analyzes the data landscape across all registered sources "
+            "(PostgreSQL, MongoDB, Elasticsearch, etc.) and identifies relevant tables, "
+            "columns, and join relationships for a given question. "
+            "Use this FIRST before generating any SQL."
+        ),
+        "system_prompt": SCHEMA_ANALYST_SYSTEM_PROMPT,
+        # Cheap model — this subagent mostly calls tools and summarizes their
+        # output, it doesn't need frontier-model reasoning like sql-generator does.
+        "model": make_langchain_model(settings.schema_analyst_model, rate_limiter),
+        # Deliberately small tool surface: one consolidated overview tool plus two
+        # drill-downs. The old six-tool list, paired with a five-step workflow
+        # prompt, made every schema-analyst run cost 5-10 LLM round trips.
+        "tools": [
+            get_schema_context,
+            get_source_schema_summary,
+            get_column_details,
+        ],
+    }

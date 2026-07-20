@@ -317,3 +317,20 @@ func (c *AIClient) RepairWidgetSQL(
 	}
 	return out.SQL, nil
 }
+
+// GetLLMSettings proxies the AI Engine's runtime LLM configuration (the
+// non-secret, UI-editable fields plus which provider keys are set). The status
+// and body are returned raw so the handler can relay them verbatim — the AI
+// Engine is authoritative for the shape and for validation.
+func (c *AIClient) GetLLMSettings(requestID string) (int, []byte, error) {
+	return requestJSONRaw(c.httpClient, http.MethodGet, c.baseURL+"/api/llm-settings", requestID, nil)
+}
+
+// UpdateLLMSettings proxies a settings change to the AI Engine, which validates
+// it, persists it, bumps its version (triggering a hot-reload of the provider/
+// agent stack), and returns the applied config. API keys are never included —
+// they stay in the AI Engine's environment. A validation error comes back as a
+// 400 with detail, relayed unchanged.
+func (c *AIClient) UpdateLLMSettings(requestID string, payload interface{}) (int, []byte, error) {
+	return requestJSONRaw(c.httpClient, http.MethodPut, c.baseURL+"/api/llm-settings", requestID, payload)
+}

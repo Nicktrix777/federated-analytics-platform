@@ -31,6 +31,7 @@ class OpenAIProvider:
         max_retries: int = 5,
         timeout: float = 30.0,
         base_url: str | None = None,
+        rate_limiter=None,
     ):
         # The OpenAI SDK retries 429/5xx internally with exponential backoff
         # up to max_retries — this is what actually protects the fast path
@@ -43,12 +44,21 @@ class OpenAIProvider:
             base_url=base_url or None,
         )
         self.model = model
+        # Optional langchain InMemoryRateLimiter, shared with this tier's
+        # deepagents model so the per-tier RPM cap covers both paths.
+        self._rate_limiter = rate_limiter
+
+    async def _acquire(self) -> None:
+        """Block until the tier's rate limiter grants a slot (no-op if unset)."""
+        if self._rate_limiter is not None:
+            await self._rate_limiter.aacquire()
 
     async def generate_plan(
         self, system_prompt: str, user_prompt: str, question: str
     ) -> "QueryPlan | Clarification":
         logger.info(f"Calling OpenAI model: {self.model}")
 
+        await self._acquire()
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -117,6 +127,7 @@ class OpenAIProvider:
         """
         logger.info(f"Calling OpenAI model for SQL repair: {self.model}")
 
+        await self._acquire()
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -154,6 +165,7 @@ class OpenAIProvider:
         """
         logger.info(f"Calling OpenAI model for batched widget SQL: {self.model}")
 
+        await self._acquire()
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -186,6 +198,7 @@ class OpenAIProvider:
         """
         logger.info(f"Calling OpenAI model for batched sheet SQL: {self.model}")
 
+        await self._acquire()
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -228,6 +241,7 @@ class OpenAIProvider:
         kwargs: dict = {"model": model, "input": texts}
         if dimensions:
             kwargs["dimensions"] = dimensions
+        await self._acquire()
         response = await self.client.embeddings.create(**kwargs)
         # data is returned in request order. OpenAI sets `index` on each item;
         # some OpenAI-compatible providers (Gemini) return index=None, so fall
@@ -247,6 +261,7 @@ class OpenAIProvider:
         response_format=json_object is enforced by the API itself, not just
         prompted, so this can't fail the way parsing a raw chat message can.
         """
+        await self._acquire()
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[

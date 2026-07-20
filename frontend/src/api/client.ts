@@ -21,6 +21,8 @@ import type {
   CreateSheetPayload,
   UpdateSheetPayload,
   AIReportResponse,
+  LLMSettingsConfig,
+  LLMSettingsResponse,
 } from "../types";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -88,6 +90,27 @@ export const api = {
     return response.data.turns;
   },
 
+};
+
+// ── LLM Settings API ──────────────────────────────────────────
+
+export const llmSettingsApi = {
+  get: async (): Promise<LLMSettingsResponse> => {
+    const response = await client.get<LLMSettingsResponse>("/api/llm-settings");
+    return response.data;
+  },
+
+  // Sends only the editable fields; the AI Engine validates + hot-reloads. A
+  // validation error surfaces as a 400 (axios throws) with detail in the body.
+  update: async (
+    config: Partial<LLMSettingsConfig>
+  ): Promise<LLMSettingsResponse & { status: string }> => {
+    const response = await client.put<LLMSettingsResponse & { status: string }>(
+      "/api/llm-settings",
+      { config }
+    );
+    return response.data;
+  },
 };
 
 // ── Data Sources API ──────────────────────────────────────────

@@ -20,6 +20,7 @@ import DashboardBuilderPage from "./pages/DashboardBuilderPage";
 import ReportsListPage from "./pages/ReportsListPage";
 import ReportDetailPage from "./pages/ReportDetailPage";
 import DataSourcesPage from "./pages/DataSourcesPage";
+import LLMSettingsPage from "./pages/LLMSettingsPage";
 
 import "./App.css";
 
@@ -51,6 +52,12 @@ function NavBar() {
         className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
       >
         🗄️ Data Sources
+      </NavLink>
+      <NavLink
+        to="/settings"
+        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
+      >
+        ⚙️ Settings
       </NavLink>
     </nav>
   );
@@ -202,6 +209,7 @@ const App: React.FC = () => {
             <Route path="/reports" element={<ReportsListPage />} />
             <Route path="/reports/:id" element={<ReportDetailPage />} />
             <Route path="/datasources" element={<DataSourcesPage />} />
+            <Route path="/settings" element={<LLMSettingsPage />} />
           </Routes>
         </div>
       </div>

@@ -1344,6 +1344,46 @@ kbd {
 .source-type-icon { font-size: 20px; }
 .source-type-label { font-size: 10px; font-weight: 500; text-transform: capitalize; }
 
+/* ── LLM Settings Page ───────────────────────────────────────── */
+.llm-page { padding: 32px 40px; max-width: 860px; margin: 0 auto; }
+.llm-header { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
+.llm-title { font-size: 26px; font-weight: 700; margin: 0; color: var(--text-primary); }
+.llm-version { color: var(--text-muted); font-size: 13px; }
+.llm-subtitle { font-size: 14px; color: var(--text-secondary); margin: 6px 0 24px; line-height: 1.5; }
+
+.llm-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.llm-section-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+.llm-section-hint { color: var(--text-muted); font-size: 12.5px; margin: 4px 0 6px; line-height: 1.5; }
+
+.llm-field { margin-top: 14px; }
+.llm-field:first-of-type { margin-top: 12px; }
+.llm-field label { font-size: 13px; font-weight: 500; color: var(--text-primary); display: block; margin-bottom: 4px; }
+.llm-field-tier { color: var(--text-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+.llm-key-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.llm-key-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+}
+.llm-key-pill.present { background: rgba(74,222,128,0.10); color: var(--green); border-color: rgba(74,222,128,0.35); }
+
+.llm-checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13.5px; color: var(--text-primary); }
+.llm-rpm-grid { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+.llm-rpm-field { flex: 1 1 180px; }
+
+.llm-actions { display: flex; gap: 12px; }
+
 /* ── Dashboard List Page ─────────────────────────────────────── */
 .dl-page { padding: 32px 40px; max-width: 1400px; margin: 0 auto; }
 .dl-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 32px; }

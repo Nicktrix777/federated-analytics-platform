@@ -11,19 +11,9 @@ This subagent receives schema context from the schema-analyst and produces SQL.
 """
 
 from config import settings
-from langchain.chat_models import init_chat_model
+from llm.providers import make_langchain_model
 
 from agents.tools.metadata_tools import get_query_history_patterns
-
-# Resolved explicitly so this subagent runs on the cheap model even when
-# invoked from a gpt-4o main agent (orchestrator) — without this it inherits
-# the parent's model, which is one of the biggest contributors to the
-# OpenAI rate-limit bursts on multi-widget dashboard requests.
-_SQL_GENERATOR_MODEL = init_chat_model(
-    settings.sql_generator_model,
-    max_retries=settings.llm_max_retries,
-    timeout=settings.llm_timeout_seconds,
-)
 
 SQL_GENERATOR_SYSTEM_PROMPT = """You are a Trino SQL Expert for a Federated Analytics Platform.
 
@@ -173,14 +163,25 @@ Respond ONLY with a valid JSON object:
 Do NOT include markdown formatting, code blocks, or any text outside the JSON object.
 If the question cannot be answered from available data, set confidence below 0.3 and explain why."""
 
-SQL_GENERATOR_SUBAGENT = {
-    "name": "sql-generator",
-    "description": (
-        "Writes valid, complete Trino SQL queries based on schema context. "
-        "Use this AFTER the schema-analyst has identified the relevant tables "
-        "and columns. Provide the schema context from the analyst as input."
-    ),
-    "system_prompt": SQL_GENERATOR_SYSTEM_PROMPT,
-    "model": _SQL_GENERATOR_MODEL,
-    "tools": [get_query_history_patterns],
-}
+def build_sql_generator_subagent(rate_limiter=None) -> dict:
+    """Build the sql-generator subagent definition.
+
+    A builder (not a module constant) so the model is resolved from the CURRENT
+    settings with the 'frontier' tier's rate limiter — supports Part B
+    hot-reload and shares the frontier RPM cap. Resolved explicitly (rather than
+    inheriting the parent orchestrator's model) so this subagent runs on
+    sql_generator_model even when the orchestrator is on a different tier — the
+    old inherit-parent behavior was a big contributor to rate-limit bursts on
+    multi-widget dashboard requests.
+    """
+    return {
+        "name": "sql-generator",
+        "description": (
+            "Writes valid, complete Trino SQL queries based on schema context. "
+            "Use this AFTER the schema-analyst has identified the relevant tables "
+            "and columns. Provide the schema context from the analyst as input."
+        ),
+        "system_prompt": SQL_GENERATOR_SYSTEM_PROMPT,
+        "model": make_langchain_model(settings.sql_generator_model, rate_limiter),
+        "tools": [get_query_history_patterns],
+    }

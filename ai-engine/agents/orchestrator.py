@@ -33,11 +33,11 @@ import re
 from typing import Optional
 
 from deepagents import create_deep_agent
-from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
-from agents.subagents.schema_analyst import SCHEMA_ANALYST_SUBAGENT
-from agents.subagents.sql_generator import SQL_GENERATOR_SUBAGENT
+from llm.providers import make_langchain_model
+from agents.subagents.schema_analyst import build_schema_analyst_subagent
+from agents.subagents.sql_generator import build_sql_generator_subagent
 from agents.tools.schema_tools import list_available_sources
 from config import settings
 from events import AgentEventRelay, EventEmitter, NullEmitter
@@ -123,28 +123,28 @@ When the question is genuinely ambiguous, unclear, or references data that doesn
 """
 
 
-def create_query_planner(model: str = "anthropic:claude-sonnet-5") -> object:
+def create_query_planner(model: str = "anthropic:claude-sonnet-5", limiters: dict | None = None) -> object:
     """
     Create the main query planner deepagent.
 
     Args:
         model: deepagents model string (e.g., 'anthropic:claude-sonnet-5')
+        limiters: optional per-tier rate limiters ({"frontier":..,"fast":..})
+            from llm.providers.build_tier_limiters(); the orchestrator + the
+            sql-generator subagent use the frontier tier, schema-analyst the fast.
 
     Returns:
         A compiled deepagent graph ready to invoke
     """
-    resolved_model = init_chat_model(
-        model,
-        max_retries=settings.llm_max_retries,
-        timeout=settings.llm_timeout_seconds,
-    )
+    limiters = limiters or {}
+    resolved_model = make_langchain_model(model, limiters.get("frontier"))
     return create_deep_agent(
         model=resolved_model,
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
         tools=[list_available_sources],
         subagents=[
-            SCHEMA_ANALYST_SUBAGENT,
-            SQL_GENERATOR_SUBAGENT,
+            build_schema_analyst_subagent(limiters.get("fast")),
+            build_sql_generator_subagent(limiters.get("frontier")),
         ],
         response_format=QueryPlanDesign,
     )

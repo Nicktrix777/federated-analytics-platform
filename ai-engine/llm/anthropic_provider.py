@@ -67,11 +67,14 @@ def _extract_json(raw: str) -> str:
 
 
 class AnthropicProvider:
-    def __init__(self, api_key: str, model: str, max_retries: int = 5, timeout: float = 30.0):
+    def __init__(self, api_key: str, model: str, max_retries: int = 5, timeout: float = 30.0, rate_limiter=None):
         # The Anthropic SDK retries 429/5xx internally with exponential backoff
         # up to max_retries — same resilience contract as the OpenAI provider.
         self.client = AsyncAnthropic(api_key=api_key, max_retries=max_retries, timeout=timeout)
         self.model = model
+        # Optional langchain InMemoryRateLimiter, shared with this tier's
+        # deepagents model so the per-tier RPM cap covers both paths.
+        self._rate_limiter = rate_limiter
 
     async def _complete_json(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
         """One Claude call returning the concatenated text of the response.
@@ -79,6 +82,8 @@ class AnthropicProvider:
         Shared by every JSON-mode method below. Raises ValueError on an empty
         response so callers get the same failure surface as the OpenAI provider.
         """
+        if self._rate_limiter is not None:
+            await self._rate_limiter.aacquire()
         response = await self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,
@@ -176,6 +181,24 @@ class AnthropicProvider:
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"Anthropic batch widget response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
+            )
+
+    async def generate_sheets_sql(self, system_prompt: str, user_prompt: str) -> dict:
+        """
+        One-shot batched SQL generation for every sheet in a report.
+
+        Anthropic sibling of OpenAIProvider.generate_sheets_sql — one call writes
+        the SQL (plus per-column Excel formats) for all sheets instead of fanning
+        out one round trip per sheet.
+        """
+        logger.info(f"Calling Anthropic model for batched sheet SQL: {self.model}")
+
+        raw_content = await self._complete_json(system_prompt, user_prompt, max_tokens=8000)
+        try:
+            return json.loads(_extract_json(raw_content))
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Anthropic batch sheet response is not valid JSON: {e}\nRaw: {raw_content[:500]}"
             )
 
     async def generate_json(self, system_prompt: str, user_prompt: str, max_tokens: int = 4000) -> dict:
