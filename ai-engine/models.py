@@ -284,3 +284,54 @@ class RepairWidgetResponse(BaseModel):
     sql: str
     changed: bool = False
     explanation: str = ""
+
+
+# ──────────────────────────────────────────────────────────────
+# Batched Widget/Sheet SQL Repair (PR-A2)
+# ──────────────────────────────────────────────────────────────
+
+
+class RepairBatchItem(BaseModel):
+    """One widget/sheet's SQL that failed a Core-API probe, as part of a
+    whole-plan repair batch. Same two modes as RepairWidgetRequest — a batch
+    may mix "error" and "zero_rows" items freely.
+    """
+
+    title: str = ""
+    chart_type: str = "table"
+    sql: str = Field(..., min_length=1, max_length=20000)
+    error: str = Field(default="", description="The Trino/execution error the SQL produced")
+    # "error": SQL failed to execute — correct the SQL.
+    # "zero_rows": SQL ran fine but returned no rows — correct filter literals.
+    mode: Literal["error", "zero_rows"] = "error"
+
+
+class RepairWidgetsBatchRequest(BaseModel):
+    """
+    All of a plan's failing widgets/sheets in ONE request, so the AI Engine
+    builds ONE context bundle and makes ONE LLM call instead of Core API
+    round-tripping /api/repair-widget once per failure (each of which rebuilds
+    a full-catalog bundle).
+
+    `datasets` is optional — empty/omitted self-loads the full catalog exactly
+    like /api/repair-widget does today.
+    """
+
+    items: List[RepairBatchItem] = Field(default_factory=list)
+    datasets: List[DatasetMeta] = []
+
+
+class RepairBatchResult(BaseModel):
+    """One item's repair outcome, aligned to the request's `items` by position
+    (the endpoint itself resolves title/position alignment against the raw LLM
+    output before building this list, so callers just zip against `items`).
+    """
+
+    title: str = ""
+    sql: str
+    changed: bool = False
+    explanation: str = ""
+
+
+class RepairWidgetsBatchResponse(BaseModel):
+    results: List[RepairBatchResult] = Field(default_factory=list)

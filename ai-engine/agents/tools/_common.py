@@ -141,14 +141,14 @@ async def run_trino_query(sql: str, source: str = "fap-ai-tools") -> list:
         if rows:
             all_rows.extend(rows)
 
-        next_uri = data.get("nextUri")
-        if not next_uri:
-            break
-
         state = data.get("stats", {}).get("state", "")
         if state in ("FAILED", "CANCELED"):
             error = data.get("error", {}).get("message", "Unknown Trino error")
             raise RuntimeError(f"Trino query failed: {error}")
+
+        next_uri = data.get("nextUri")
+        if not next_uri:
+            break
 
         resp = await client.get(next_uri, headers=headers)
         resp.raise_for_status()

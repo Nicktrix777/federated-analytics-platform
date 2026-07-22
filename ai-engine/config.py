@@ -128,12 +128,17 @@ class Settings(BaseSettings):
     )
 
     # ── Agent depth control ──────────────────────────────────
+    # Only the chat query planner still runs as a deepagents ReAct loop (the
+    # report/dashboard designers were converted to a deterministic two-call
+    # pipeline — see agents/report_planner.py, agents/dashboard_planner.py).
+    # A chat turn resolves in a handful of hops, so the cap is tight enough
+    # that a wandering run fails fast instead of spinning for minutes.
     agent_recursion_limit: int = Field(
-        default=20,
+        default=12,
         description=(
-            "LangGraph recursion_limit for deepagent runs — caps how many "
-            "graph steps (LLM turns + tool executions) one pipeline can take "
-            "before erroring, so a wandering agent can't spin for minutes"
+            "LangGraph recursion_limit for the chat query-planner deepagent — "
+            "caps how many graph steps (LLM turns + tool executions) one run "
+            "can take before erroring, so a wandering agent can't spin for minutes"
         ),
     )
 
@@ -198,6 +203,15 @@ class Settings(BaseSettings):
     schema_rag_top_k: int = Field(
         default=8,
         description="Max datasets retrieved per question before falling back to the full catalog",
+    )
+    design_low_confidence_retry_threshold: float = Field(
+        default=0.4,
+        description=(
+            "Report/dashboard design confidence below this triggers ONE retry against "
+            "the full (untrimmed) catalog instead of the schema-RAG top-k selection — "
+            "recovers briefs where the trim excluded a dataset the brief actually needed. "
+            "The retry is kept only if it scores a higher confidence than the original."
+        ),
     )
 
     # ── Semantic few-shots (Phase 2) ─────────────────────────

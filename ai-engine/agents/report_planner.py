@@ -1,53 +1,45 @@
 """
-Report Designer — deepagents pipeline for AI Excel-report generation.
+Report Designer — deterministic two-call pipeline for AI Excel-report generation.
 
-The dashboard designer's sibling, built on the same plan-then-batch-SQL
+The dashboard designer's sibling, built on the same design-then-batch-SQL
 pattern: given a natural-language brief ("monthly contract revenue report by
 agency"), the designer
-  1. analyzes the data landscape (delegating to schema-analyst when the
-     pre-loaded context doesn't cover it),
-  2. decides which worksheets tell the story (summary first, detail
-     breakdowns after),
-  3. describes each sheet's data requirements (no SQL yet),
-  4. returns one ReportPlan JSON.
+  1. makes ONE structured design call — decides which worksheets tell the
+     story (summary first, detail breakdowns after) and describes each
+     sheet's data requirements (no SQL yet) — against the schema context the
+     Core API/context_bundle already pre-loaded (no schema-analyst discovery
+     step; that subagent only remains on the chat query-planner path).
+  2. writes the Trino SQL for every sheet — plus its per-column Excel
+     formats — in ONE follow-up call (_generate_sheet_sql_batch).
 
-The Trino SQL for every sheet — plus its per-column Excel formats — is then
-written in ONE follow-up call (_generate_sheet_sql_batch, same batching that
-fixed the dashboard pipeline's per-widget 429 storms).
+No LangGraph, no tools, no ReAct loop on this path — a 5-sheet report is
+exactly 2 LLM calls, and GraphRecursionError is structurally impossible here.
 
-The same agent also REFINES an existing report: when the request carries the
+The same function also REFINES an existing report: when the request carries the
 current report state, the instruction is applied to it and the full updated
 plan is returned.
 
 Latency note: a report is generated once and refined occasionally, so this
-path deliberately uses the full pipeline — there is no fast path here.
+path deliberately favors quality over the fast-path's single-call brevity —
+there is no fast path here, just fewer/cheaper calls than the old ReAct loop.
 """
 
 import json
 import logging
 from typing import Optional
 
-from deepagents import create_deep_agent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from llm.providers import make_langchain_model
-from agents.orchestrator import _extract_json_from_files, _extract_json_plan, _normalize_content, run_agent
-from events import EventEmitter
-from agents.subagents.schema_analyst import build_schema_analyst_subagent
+from events import EventEmitter, NullEmitter
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
-from agents.tools.schema_tools import list_available_sources
-from config import settings
 from models import ReportPlan, SheetPlan
 from llm.openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
 
 
-# Passed to create_deep_agent as response_format= — same rationale as the
-# dashboard designer: with response_format set, the framework runs a dedicated
-# structured-output step after the ReAct loop finishes, enforced by the API
-# itself, instead of trusting the model to voluntarily end its chat reply with
-# clean JSON.
+# Validates the design call's JSON before it's trusted — a ValidationError here
+# is the trigger to retry via _structure_report_design (see generate_report_plan).
 class SheetDesign(BaseModel):
     title: str
     description: str = ""
@@ -68,25 +60,26 @@ class ReportDesign(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     explanation: str = ""
 
-REPORT_DESIGNER_SYSTEM_PROMPT = """You are the Report Designer for a Federated Analytics Platform.
+REPORT_DESIGN_SYSTEM_PROMPT = """You are the Report Designer for a Federated Analytics Platform.
 
 You turn a natural-language brief into a complete Excel report: a set of worksheets,
 each backed by a Trino SQL query over the platform's federated data sources.
 
-## Workflow
+## Data available to you
 
-**Step 1 — Understand the data (delegate to schema-analyst, CONDITIONAL)**
-Check the "Additional context" block first — the Core API pre-loads dataset names, Trino
-paths, and columns there. If it already covers what the brief needs, skip schema-analyst.
-Otherwise delegate to schema-analyst to discover the relevant tables and joins.
+The "Additional context" block in the user message is the full pre-loaded schema —
+registered datasets, columns, sample values, and curated join relationships. Use ONLY
+what's there; there is no further schema discovery step in this pipeline.
 
-**Step 2 — Design the sheets**
+## Design the sheets
+
 Pick 1-6 sheets that best answer the brief. Compose a document, not a random set:
 - Sheet 1 is an executive summary: headline aggregates / KPI rows
 - Later sheets are detail breakdowns (per-entity, per-period, top-N lists)
 - Each sheet is ONE flat tabular query — a reader opens the workbook and reads it top down
 
-**Step 3 — Describe each sheet's data requirements (do NOT write SQL yourself)**
+## Describe each sheet's data requirements (do NOT write SQL yourself)
+
 SQL is written afterward, in one separate batched pass outside this conversation — you
 only specify what each sheet needs. For every sheet, write a precise "data_requirements"
 string: which table(s)/index(es), which exact columns (verbatim from the schema context),
@@ -103,42 +96,37 @@ If the user message contains a "Current report" block, you are EDITING that repo
 not creating one. Apply the instruction (add/remove/change sheets, retitle, reorder),
 keep everything the user didn't ask to change, and return the FULL updated report.
 
-## Output
-
-Your final answer is captured as structured data (name, description, sheets, confidence,
-explanation) — you don't need to format JSON yourself. Do NOT repeat the schema context
-in your answer — the SQL-writing pass that follows already has it. Keep each sheet's
-data_requirements to what's specific to THAT sheet.
-
 ## Rules
-- Use ONLY column names that appear verbatim in the schema context or schema-analyst output.
-  NEVER invent plausible-sounding names — a real column is often shorter or differently named
-  than you'd guess (e.g. a table may have "name" rather than "<entity>_name"). If a column you
-  need isn't listed, delegate to schema-analyst to verify before describing the sheet's
-  data_requirements.
+- Use ONLY column names that appear verbatim in the schema context. NEVER invent
+  plausible-sounding names — a real column is often shorter or differently named than
+  you'd guess (e.g. a table may have "name" rather than "<entity>_name").
 - If the brief cannot be served by the available data, return your best partial report
   with confidence below 0.3 and say what's missing in the explanation
-"""
+
+## Response Format
+
+Respond ONLY with raw JSON matching this EXACT schema — no markdown, no code fences, no
+prose before or after:
+{
+  "name": "<short report name>",
+  "description": "<one-sentence description>",
+  "sheets": [
+    {
+      "title": "<sheet title>",
+      "description": "<what this sheet shows>",
+      "data_requirements": "<precise spec of tables/columns/joins/filters/grouping/ordering needed>"
+    }
+  ],
+  "confidence": <0.0 to 1.0>,
+  "explanation": "<how the report answers the brief>"
+}"""
 
 
-def create_report_designer(model: str = "anthropic:claude-sonnet-5", limiters: dict | None = None) -> object:
-    """Create the report designer deepagent."""
-    limiters = limiters or {}
-    resolved_model = make_langchain_model(model, limiters.get("frontier"))
-    return create_deep_agent(
-        model=resolved_model,
-        system_prompt=REPORT_DESIGNER_SYSTEM_PROMPT,
-        tools=[list_available_sources],
-        subagents=[
-            build_schema_analyst_subagent(limiters.get("fast")),
-        ],
-        response_format=ReportDesign,
-    )
-
-
-# Fallback for when the designer's final chat message isn't parseable JSON —
-# same guaranteed-JSON reformat pass as the dashboard designer's
-# STRUCTURE_WIDGET_DESIGN_PROMPT (see that comment for the full rationale).
+# Fallback for when the design call's JSON doesn't validate against
+# ReportDesign (missing/malformed fields) — a second, guaranteed-JSON-mode call
+# reformats whatever came back into the exact schema. If the raw output was
+# cut off mid-thought, build the best report supportable by what IS there and
+# lower confidence accordingly.
 STRUCTURE_SHEET_DESIGN_PROMPT = """You are given a report designer's raw output, which
 describes a set of Excel report sheets for a natural-language brief. It may include stray
 prose before/after the structured plan, or may have been cut off before finishing.
@@ -163,13 +151,13 @@ Respond ONLY with:
 
 
 async def _structure_report_design(provider: OpenAIProvider, prompt: str, raw_output: str) -> dict:
-    """Guaranteed-JSON fallback: reformat the designer's raw chat output into the sheet schema."""
+    """Guaranteed-JSON fallback: reformat the designer's raw output into the sheet schema."""
     user_prompt = f"Original report brief:\n{prompt}\n\nDesigner's raw output to structure:\n{raw_output}"
-    return await provider.generate_json(STRUCTURE_SHEET_DESIGN_PROMPT, user_prompt)
+    return await provider.generate_json(STRUCTURE_SHEET_DESIGN_PROMPT, user_prompt, max_tokens=8000)
 
 
-# The designer only decides WHAT each sheet needs (see REPORT_DESIGNER_SYSTEM_PROMPT
-# Step 3) — this prompt drives the single follow-up call that writes ALL of the sheets'
+# The design call only decides WHAT each sheet needs (see REPORT_DESIGN_SYSTEM_PROMPT)
+# — this prompt drives the single follow-up call that writes ALL of the sheets'
 # SQL (and per-column Excel formats) at once.
 BATCH_SHEET_SQL_SYSTEM_PROMPT = SQL_GENERATOR_SYSTEM_PROMPT + """
 
@@ -201,7 +189,6 @@ sheets you were given."""
 
 
 async def generate_report_plan(
-    agent,
     prompt: str,
     sql_provider: OpenAIProvider,
     extra_context: Optional[str] = None,
@@ -209,19 +196,20 @@ async def generate_report_plan(
     emitter: Optional[EventEmitter] = None,
 ) -> ReportPlan:
     """
-    Invoke the report designer and extract a structured ReportPlan.
+    Design (or refine) a report as a deterministic two-call pipeline.
 
     Args:
-        agent: The compiled deepagent from create_report_designer()
         prompt: The report brief (generate) or instruction (refine)
-        sql_provider: OpenAI client used for the one batched SQL call
+        sql_provider: OpenAI-compatible client used for BOTH the structured
+            design call and the batched sheet-SQL call
         extra_context: Pre-loaded schema context from the Core API
         current_report: Existing report state when refining
         emitter: Progress event sink for SSE streaming (NullEmitter if absent)
 
     Raises:
-        ValueError: If the agent output cannot be parsed into a ReportPlan
+        ValueError: If the design/SQL calls fail or produce no usable sheets
     """
+    emitter = emitter or NullEmitter()
     user_message = prompt
     if current_report:
         user_message += (
@@ -231,34 +219,20 @@ async def generate_report_plan(
     if extra_context:
         user_message += f"\n\nAdditional context:\n{extra_context}"
 
-    logger.info(f"Invoking report designer for: {prompt[:100]}")
+    logger.info(f"Designing report for: {prompt[:100]}")
 
     try:
-        raw_content, files, structured = await run_agent(
-            agent, user_message, emitter=emitter, agent_name="report-designer"
-        )
-        content = _normalize_content(raw_content)
-        logger.debug(f"Designer output (last 500 chars): {content[-500:]}")
-
-        # response_format=ReportDesign (see create_report_designer) makes this
-        # the normal path — the framework enforces the schema via a dedicated
-        # structured-output step, so this doesn't depend on the model voluntarily
-        # ending its chat reply with clean JSON. The extraction attempts below are
-        # a defensive fallback for the rare case structured_response comes back None.
-        if structured is not None:
-            data = structured.model_dump() if hasattr(structured, "model_dump") else structured
-        else:
-            logger.warning("Designer returned no structured_response — falling back to text extraction")
-            try:
-                data = _extract_json_plan(content, required_key="sheets")
-            except ValueError:
-                data = _extract_json_from_files(files, "sheets")
-            if data is None:
-                logger.warning(
-                    "Designer's final message and virtual files had no parseable "
-                    "JSON — falling back to a guaranteed-JSON structuring pass"
-                )
-                data = await _structure_report_design(sql_provider, prompt, content)
+        # max_tokens=8000 matches the batched SQL call's headroom (default is
+        # 4000) — a brief that legitimately needs many sheets, each with a
+        # detailed data_requirements spec, can otherwise get cut off mid-JSON.
+        raw = await sql_provider.generate_json(REPORT_DESIGN_SYSTEM_PROMPT, user_message, max_tokens=8000)
+        try:
+            design = ReportDesign(**raw)
+        except ValidationError as e:
+            logger.warning(f"Report design call didn't match the schema ({e}) — reformatting")
+            reformatted = await _structure_report_design(sql_provider, prompt, json.dumps(raw))
+            design = ReportDesign(**reformatted)
+        data = design.model_dump()
 
         sheet_designs = data.get("sheets") or []
         if not sheet_designs:
@@ -267,15 +241,13 @@ async def generate_report_plan(
         # Reuse the same schema text the designer was given rather than asking
         # the model to transcribe it into its own output (same truncation risk
         # the dashboard pipeline hit).
-        if emitter is not None:
-            await emitter.emit(
-                "stage",
-                stage="sheet_sql_started",
-                detail=f"writing SQL for {len(sheet_designs)} sheets in one batched call",
-            )
+        await emitter.emit(
+            "stage",
+            stage="sheet_sql_started",
+            detail=f"writing SQL for {len(sheet_designs)} sheets in one batched call",
+        )
         sql_by_index = await _generate_sheet_sql_batch(sql_provider, extra_context or "", sheet_designs)
-        if emitter is not None:
-            await emitter.emit("stage", stage="sheet_sql_done")
+        await emitter.emit("stage", stage="sheet_sql_done")
 
         return _build_report_plan(data, prompt, sql_by_index)
     except Exception as e:
@@ -288,10 +260,11 @@ async def _generate_sheet_sql_batch(
 ) -> list:
     """One LLM call that writes SQL + column formats for every sheet in the plan.
 
-    Returns a list of {"sql", "column_formats", "confidence"} dicts aligned by
-    position with sheet_designs. If the model returns fewer/more entries than
-    requested, this pads/truncates defensively rather than raising — a missing
-    sheet is dropped downstream instead of failing the whole report.
+    Returns a list of {"sql", "column_formats", "confidence"} dicts aligned to
+    sheet_designs by title first (the batch prompt asks for the same "title"
+    back), falling back to position for any entry with no/duplicate title
+    match — this survives the model reordering or dropping an entry instead of
+    misattributing SQL to the wrong sheet.
     """
     briefs = [
         {
@@ -313,19 +286,24 @@ async def _generate_sheet_sql_batch(
     if len(sql_entries) != len(briefs):
         logger.warning(
             f"Batched sheet SQL returned {len(sql_entries)} entries for "
-            f"{len(briefs)} sheets requested — aligning by position."
+            f"{len(briefs)} sheets requested — aligning by title/position."
         )
 
-    entries = [
-        {
+    by_title: dict[str, dict] = {}
+    for e in sql_entries:
+        t = (e.get("title") or "").strip()
+        if t and t not in by_title:
+            by_title[t] = e
+
+    entries = []
+    for i, brief in enumerate(briefs):
+        e = by_title.get(brief["title"]) or (sql_entries[i] if i < len(sql_entries) else {})
+        entries.append({
             "sql": (e.get("sql") or "").strip(),
             "column_formats": e.get("column_formats") if isinstance(e.get("column_formats"), dict) else {},
             "confidence": e.get("confidence", 0.7),
-        }
-        for e in sql_entries
-    ]
-    entries += [{"sql": "", "column_formats": {}, "confidence": 0.0}] * (len(briefs) - len(entries))  # pad missing entries
-    return entries[: len(briefs)]  # truncate any extras
+        })
+    return entries
 
 
 def _build_report_plan(data: dict, prompt: str, sql_by_index: list) -> ReportPlan:

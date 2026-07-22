@@ -15,6 +15,50 @@ import (
 	"github.com/federated-analytics/core-api/services"
 )
 
+// probeOutcome is one candidate widget/sheet's Phase-1 probe result in the
+// dashboard/report batched-repair driver (see validatePlanWidgets/
+// validatePlanSheets) — resp is nil when err is non-nil.
+type probeOutcome struct {
+	resp *models.ExecuteResponse
+	err  error
+}
+
+// matchBatchRepairResult finds the batched-repair result for the k-th entry
+// of items (the slice actually sent to AIClient.RepairWidgetsBatch). Results
+// are matched by title — the same alignment convention the AI Engine's
+// batched SQL generation already uses — but only when that title is
+// unambiguous among items; a repeated or absent title falls back to
+// positional index k, mirroring the plan's "positional fallback if
+// ambiguous" contract for /api/repair-widgets-batch.
+func matchBatchRepairResult(
+	items []services.RepairBatchItem,
+	results []services.RepairBatchResultItem,
+	k int,
+) (services.RepairBatchResultItem, bool) {
+	if k < 0 || k >= len(items) {
+		return services.RepairBatchResultItem{}, false
+	}
+	title := items[k].Title
+
+	count := 0
+	for _, it := range items {
+		if it.Title == title {
+			count++
+		}
+	}
+	if count == 1 {
+		for _, r := range results {
+			if r.Title == title {
+				return r, true
+			}
+		}
+	}
+	if k < len(results) {
+		return results[k], true
+	}
+	return services.RepairBatchResultItem{}, false
+}
+
 // maxQueryRepairAttempts bounds how many times a failed AI-generated query is
 // sent back to the AI Engine to repair before giving up.
 const maxQueryRepairAttempts = 2
@@ -654,6 +698,18 @@ func firstLine(s string) string {
 		return s[:idx]
 	}
 	return s
+}
+
+// probeSQL wraps a validated SELECT/CTE query into a cheap existence/shape
+// check: at most 25 rows, run as a derived table so the original query's own
+// LIMIT (if any) and ORDER BY still apply first. A hallucinated column/table
+// or a Trino-incompatible construct fails identically whether the outer
+// query asks for 25 rows or 25,000 — this is used everywhere dashboard/report
+// generation verifies AI-generated SQL against Trino, so a slow/large result
+// set no longer inflates verification latency.
+func probeSQL(sql string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(sql), ";")
+	return fmt.Sprintf("SELECT * FROM (%s) AS probe_ LIMIT 25", trimmed)
 }
 
 func errorf(format string, args ...interface{}) error {

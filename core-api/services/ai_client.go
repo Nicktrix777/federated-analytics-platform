@@ -318,6 +318,67 @@ func (c *AIClient) RepairWidgetSQL(
 	return out.SQL, nil
 }
 
+// RepairBatchItem is one failing query in a batched repair request — same
+// per-item shape as RepairWidgetRequest (title/chart_type/sql/error/mode)
+// minus Datasets, which travels once for the whole batch (see
+// RepairBatchRequest.Datasets) rather than per item.
+type RepairBatchItem struct {
+	Title     string `json:"title"`
+	ChartType string `json:"chart_type"`
+	SQL       string `json:"sql"`
+	Error     string `json:"error"`
+	Mode      string `json:"mode,omitempty"`
+}
+
+// RepairBatchRequest is the payload for POST /api/repair-widgets-batch.
+// Datasets is omitempty and, like every other AI-Engine call, left unset —
+// the AI Engine self-loads its full catalog when datasets is empty.
+type RepairBatchRequest struct {
+	Items    []RepairBatchItem    `json:"items"`
+	Datasets []models.DatasetMeta `json:"datasets,omitempty"`
+}
+
+// RepairBatchResultItem is one fixed (or confirmed-unchanged) query coming
+// back from a batched repair call. Changed tells the caller whether the AI
+// Engine actually altered the SQL — the zero_rows caller uses this instead
+// of its own trimmed-string comparison.
+type RepairBatchResultItem struct {
+	Title       string `json:"title"`
+	SQL         string `json:"sql"`
+	Changed     bool   `json:"changed"`
+	Explanation string `json:"explanation"`
+}
+
+type repairBatchResponse struct {
+	Results []RepairBatchResultItem `json:"results"`
+}
+
+// RepairWidgetsBatch asks the AI Engine to repair every failing query in
+// items with a single round trip, instead of the N independent
+// RepairWidgetSQL calls the per-item fallback path makes. Results are meant
+// to align to items by Title (with positional fallback when a title is
+// ambiguous or missing) — see matchBatchRepairResult in handlers/query.go,
+// which the dashboard/report verify passes use to do that matching. The
+// caller must still re-verify every returned SQL against Trino; the AI
+// Engine never executes.
+func (c *AIClient) RepairWidgetsBatch(requestID string, items []RepairBatchItem) ([]RepairBatchResultItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	reqBody := RepairBatchRequest{Items: items}
+
+	resp, err := postJSON(c.httpClient, c.baseURL+"/api/repair-widgets-batch", requestID, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("AI engine batch repair request failed: %w", err)
+	}
+
+	var out repairBatchResponse
+	if err := decodeJSON(resp, "AI engine batch repair", &out); err != nil {
+		return nil, err
+	}
+	return out.Results, nil
+}
+
 // GetLLMSettings proxies the AI Engine's runtime LLM configuration (the
 // non-secret, UI-editable fields plus which provider keys are set). The status
 // and body are returned raw so the handler can relay them verbatim — the AI

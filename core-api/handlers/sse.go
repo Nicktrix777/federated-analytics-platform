@@ -24,6 +24,12 @@ type sseStream struct {
 	writer    gin.ResponseWriter
 	start     time.Time
 	requestID string
+	// writeMu guards the writer against concurrent frame writes — the
+	// heartbeat ticker runs on its own goroutine, and PR-B1's parallel widget/
+	// sheet verification calls the progress callback (which emits here) from
+	// multiple goroutines at once. Without this, concurrent writes can
+	// interleave mid-frame and corrupt the SSE stream.
+	writeMu sync.Mutex
 	// heartbeat ticker state
 	hbStop chan struct{}
 	hbOnce sync.Once
@@ -88,6 +94,8 @@ func (s *sseStream) stopHeartbeat() {
 // forward writes an upstream event through verbatim — same event name, same
 // (already-JSON) data payload — and flushes so the client sees it immediately.
 func (s *sseStream) forward(name, data string) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	fmt.Fprintf(s.writer, "event: %s\ndata: %s\n\n", name, data)
 	s.writer.Flush()
 }
@@ -95,6 +103,8 @@ func (s *sseStream) forward(name, data string) {
 // heartbeat relays a comment frame so proxies keep the connection open.
 // Clients ignore these per the contract.
 func (s *sseStream) heartbeat() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	fmt.Fprint(s.writer, ": heartbeat\n\n")
 	s.writer.Flush()
 }

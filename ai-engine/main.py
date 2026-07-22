@@ -29,6 +29,7 @@ The Core API is responsible for:
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -47,14 +48,18 @@ from models import (
     PlanOutcome,
     PlanRequest,
     QueryPlan,
+    RepairBatchItem,
+    RepairBatchResult,
     RepairWidgetRequest,
     RepairWidgetResponse,
+    RepairWidgetsBatchRequest,
+    RepairWidgetsBatchResponse,
     ReportPlan,
     ReportPlanRequest,
 )
 from agents.orchestrator import create_query_planner, generate_query_plan
-from agents.dashboard_planner import create_dashboard_designer, generate_dashboard_plan
-from agents.report_planner import create_report_designer, generate_report_plan
+from agents.dashboard_planner import generate_dashboard_plan
+from agents.report_planner import generate_report_plan
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
 from agents.tools.validation_tools import validate_and_fix_sql
 from agents.tools._common import close_shared_clients
@@ -93,9 +98,10 @@ logger = logging.getLogger(__name__)
 
 
 # ── Global Agent Instances ────────────────────────────────────
+# The dashboard/report designers are no longer deepagents graphs (PR-A1) — they
+# run as a deterministic two-call pipeline through _widget_sql_provider below,
+# so only the chat query planner needs a compiled agent.
 _agent = None
-_dashboard_agent = None
-_report_agent = None
 
 # Fast-path provider is created ONCE at startup and reused for every request.
 # The Async client inside it keeps a persistent connection pool to the LLM
@@ -197,21 +203,21 @@ def _build_llm_stack() -> None:
     (set to None, logged) when its required cloud key is missing, which degrades
     only that feature (e.g. no embeddings key → RAG falls back to full catalog).
     """
-    global _agent, _dashboard_agent, _report_agent
+    global _agent
     global _fast_provider, _widget_sql_provider, _embed_provider
 
     _export_provider_keys()
     limiters = build_tier_limiters()
 
-    # Custom single-shot path (fast plan / widget+sheet SQL / repair / embeddings).
+    # Custom single-shot path (fast plan / widget+sheet SQL / repair / embeddings /
+    # dashboard+report design calls — see agents/dashboard_planner.py, agents/report_planner.py).
     _fast_provider = make_custom_provider(settings.fast_path_model, limiters["fast"])
     _widget_sql_provider = make_custom_provider(settings.dashboard_widget_sql_model, limiters["frontier"])
     _embed_provider = make_custom_provider(settings.embedding_model, limiters["embed"])
 
-    # deepagents path (orchestrator + designers + subagents), with per-tier limiters.
+    # deepagents path — only the chat query planner (schema-analyst + sql-generator)
+    # still runs as a ReAct loop; report/dashboard generation is deterministic (PR-A1).
     _agent = create_query_planner(model=settings.llm_model, limiters=limiters)
-    _dashboard_agent = create_dashboard_designer(model=settings.llm_model, limiters=limiters)
-    _report_agent = create_report_designer(model=settings.llm_model, limiters=limiters)
 
     logger.info(
         "LLM stack ready — deepagents=%s | fast=%s | widget/sheet=%s | embed=%s | "
@@ -263,7 +269,7 @@ async def watch_llm_settings_version() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _watcher_task, _settings_watcher_task, _agent, _dashboard_agent, _report_agent
+    global _watcher_task, _settings_watcher_task, _agent
     try:
         # Apply the DB config overlay (non-secret UI-editable fields) on top of
         # the env defaults BEFORE building the stack, so a saved config survives
@@ -288,8 +294,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Agent init failed: {e}. AI mode will return errors.")
         _agent = None
-        _dashboard_agent = None
-        _report_agent = None
     yield
     for task in (_watcher_task, _settings_watcher_task):
         if task is not None:
@@ -645,14 +649,59 @@ async def generate_plan_stream(request: PlanRequest, x_request_id: str = Header(
     return StreamingResponse(emitter.iter_sse(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
+async def _retry_low_confidence_design(plan, redesign, request_datasets, emitter, label: str):
+    """If a report/dashboard design came back below confidence threshold, retry ONCE
+    against the full (untrimmed) catalog instead of the schema-RAG top-k selection —
+    this is what rescues a brief whose relevant dataset didn't make the top-k cut.
+    `redesign` is an async callable(extra_context) -> plan (same shape as `plan`).
+
+    Keeps the retry only if it scores a higher confidence than the original; any
+    retry failure is logged and swallowed since the original plan is still usable —
+    this is a best-effort quality pass, not a required step.
+    """
+    if plan.confidence >= settings.design_low_confidence_retry_threshold:
+        return plan
+
+    logger.info(
+        f"{label} confidence {plan.confidence:.2f} below "
+        f"{settings.design_low_confidence_retry_threshold} — retrying against the full catalog"
+    )
+    await emitter.emit(
+        "stage",
+        stage="low_confidence_retry",
+        detail=f"confidence {plan.confidence:.2f} was low — retrying with the full data catalog",
+    )
+    try:
+        # question=None skips the schema-RAG trim (and few-shot fetch) — same
+        # full-catalog pattern /api/repair-widget uses when it needs every
+        # identifier in scope rather than just the brief-relevant subset.
+        full_bundle = await build_context_bundle(
+            None,
+            provider=_embed_provider,
+            datasets=request_datasets or None,
+            include_examples=False,
+        )
+        retry_plan = await redesign(render_extra_context(full_bundle))
+    except Exception as e:
+        logger.warning(f"{label} low-confidence retry failed, keeping original plan: {e}")
+        return plan
+
+    if retry_plan.confidence > plan.confidence:
+        logger.info(f"{label} retry improved confidence {plan.confidence:.2f} -> {retry_plan.confidence:.2f}")
+        return retry_plan
+    return plan
+
+
 # ── Dashboard Pipeline (shared by sync + stream endpoints) ────
 async def _run_dashboard_pipeline(request: DashboardPlanRequest, emitter: EventEmitter) -> DashboardPlan:
-    if _dashboard_agent is None or _widget_sql_provider is None:
+    if _widget_sql_provider is None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Dashboard designer agent is not initialized. "
-                "Check OPENAI_API_KEY and LLM_MODEL environment variables."
+                "Dashboard designer is not initialized — no LLM provider configured for "
+                "DASHBOARD_WIDGET_SQL_MODEL. Check its provider's API key "
+                "(LLM_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY, "
+                "whichever matches the configured provider) and the model setting itself."
             ),
         )
 
@@ -693,25 +742,31 @@ async def _run_dashboard_pipeline(request: DashboardPlanRequest, emitter: EventE
             retrieval_query,
             provider=_embed_provider,
             datasets=request.datasets or None,
-            include_examples=False,
+            include_examples=True,
             emitter=emitter,
         )
         extra_context = render_extra_context(bundle)
 
-        try:
-            plan = await generate_dashboard_plan(
-                _dashboard_agent,
+        def _redesign(ctx: Optional[str]):
+            return generate_dashboard_plan(
                 request.prompt,
                 _widget_sql_provider,
-                extra_context=extra_context,
+                extra_context=ctx,
                 current_dashboard=request.current_dashboard,
                 emitter=emitter,
             )
+
+        try:
+            plan = await _redesign(extra_context)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except Exception as e:
             logger.error(f"Dashboard designer invocation failed: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail=f"Dashboard designer failed: {str(e)}")
+
+        plan = await _retry_low_confidence_design(
+            plan, _redesign, request.datasets, emitter, "Dashboard design"
+        )
 
         # Deterministic safety gate per widget; drop the ones that fail.
         await emitter.emit("stage", stage="validating", detail=f"{len(plan.widgets)} widgets")
@@ -785,12 +840,14 @@ async def generate_dashboard_stream(
 
 # ── Report Pipeline (shared by sync + stream endpoints) ───────
 async def _run_report_pipeline(request: ReportPlanRequest, emitter: EventEmitter) -> ReportPlan:
-    if _report_agent is None or _widget_sql_provider is None:
+    if _widget_sql_provider is None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Report designer agent is not initialized. "
-                "Check OPENAI_API_KEY and LLM_MODEL environment variables."
+                "Report designer is not initialized — no LLM provider configured for "
+                "DASHBOARD_WIDGET_SQL_MODEL. Check its provider's API key "
+                "(LLM_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY, "
+                "whichever matches the configured provider) and the model setting itself."
             ),
         )
 
@@ -826,25 +883,31 @@ async def _run_report_pipeline(request: ReportPlanRequest, emitter: EventEmitter
             retrieval_query,
             provider=_embed_provider,
             datasets=request.datasets or None,
-            include_examples=False,
+            include_examples=True,
             emitter=emitter,
         )
         extra_context = render_extra_context(bundle)
 
-        try:
-            plan = await generate_report_plan(
-                _report_agent,
+        def _redesign(ctx: Optional[str]):
+            return generate_report_plan(
                 request.prompt,
                 _widget_sql_provider,
-                extra_context=extra_context,
+                extra_context=ctx,
                 current_report=request.current_report,
                 emitter=emitter,
             )
+
+        try:
+            plan = await _redesign(extra_context)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
         except Exception as e:
             logger.error(f"Report designer invocation failed: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail=f"Report designer failed: {str(e)}")
+
+        plan = await _retry_low_confidence_design(
+            plan, _redesign, request.datasets, emitter, "Report design"
+        )
 
         # Deterministic safety gate per sheet; drop the ones that fail. Sheets
         # feed a row-capped Excel export, not a results grid, so the injected
@@ -1039,6 +1102,178 @@ async def repair_widget(request: RepairWidgetRequest) -> RepairWidgetResponse:
         changed=changed,
         explanation="",
     )
+
+
+# ── Batched Widget/Sheet SQL Repair (PR-A2) ───────────────────
+# Adapts REPAIR_SYSTEM_PROMPT/ZERO_ROWS_REPAIR_SYSTEM_PROMPT for a whole list
+# in one call, mirroring the exact batch pattern BATCH_SQL_SYSTEM_PROMPT /
+# BATCH_SHEET_SQL_SYSTEM_PROMPT already use in dashboard_planner.py /
+# report_planner.py (numbered JSON list in, title-keyed JSON list out).
+BATCH_REPAIR_SYSTEM_PROMPT = SQL_GENERATOR_SYSTEM_PROMPT + """
+
+## Batch Repair Mode
+You are given a JSON list of Trino SQL queries that each need fixing or reviewing. Every
+item carries a "mode":
+
+- "error": the SQL FAILED to execute — the "error" field carries the EXACT Trino error.
+  Fix the broken identifier(s) (most often a column/table name that doesn't exist). Map it
+  to the correct name that appears VERBATIM in the schema context. Only use names present
+  in the schema context — never invent one.
+- "zero_rows": the SQL EXECUTED SUCCESSFULLY but returned zero rows. Look for a filter
+  literal that likely mismatches how values are actually stored (e.g. 'US' vs
+  'United States', 'ACTIVE' vs 'active') and correct it based on the schema context (sample
+  values, column names, patterns). If zero rows is GENUINELY CORRECT for this query (e.g.
+  "orders from next year" — none exist yet), return the SQL UNCHANGED.
+
+For every item, preserve the query's original intent and result SHAPE exactly — same
+number/kind of output columns, same aggregation, same ordering — so it still fits its
+original chart type. Fix/review ALL items in this single response — do not skip any, do
+not ask follow-up questions. If an item genuinely cannot be fixed from the available
+schema, return your closest attempt and a low confidence explanation.
+
+Respond ONLY with JSON:
+{"repairs": [
+  {"title": "<same title as given>", "sql": "<corrected (or unchanged) Trino SELECT SQL>",
+   "explanation": "<what you changed, or 'unchanged' if nothing needed fixing>"},
+  ...
+]}
+The "repairs" array must have exactly the same number of entries, in the same order, as the
+items you were given.
+"""
+
+
+async def _repair_widgets_batch(
+    provider, schema_context: str, items: list[RepairBatchItem]
+) -> list[dict]:
+    """One LLM call that repairs/reviews every item in the batch.
+
+    Returns a list of {"sql", "explanation"} dicts aligned to `items` by title
+    first (the batch prompt asks for the same "title" back), falling back to
+    position for any entry with no/duplicate title match — the exact
+    tie-breaking logic _generate_widget_sql_batch (dashboard_planner.py) /
+    _generate_sheet_sql_batch (report_planner.py) already use.
+    """
+    briefs = [
+        {
+            "title": it.title or f"Item {i + 1}",
+            "chart_type": it.chart_type or "table",
+            "mode": it.mode,
+            "sql": it.sql,
+            "error": it.error or "(no error message provided)",
+        }
+        for i, it in enumerate(items)
+    ]
+    user_prompt = (
+        f"Schema context:\n{schema_context or '(none provided)'}\n\n"
+        f"Items needing repair (return exactly {len(briefs)} entries, same order):\n"
+        + json.dumps(briefs, indent=2)
+    )
+
+    result = await provider.generate_json(BATCH_REPAIR_SYSTEM_PROMPT, user_prompt, max_tokens=8000)
+    repairs = result.get("repairs") or []
+
+    if len(repairs) != len(briefs):
+        logger.warning(
+            f"Batched repair returned {len(repairs)} entries for {len(briefs)} items "
+            "requested — aligning by title/position."
+        )
+
+    by_title: dict[str, dict] = {}
+    for r in repairs:
+        t = (r.get("title") or "").strip()
+        if t and t not in by_title:
+            by_title[t] = r
+
+    out = []
+    for i, brief in enumerate(briefs):
+        entry = by_title.get(brief["title"]) or (repairs[i] if i < len(repairs) else {})
+        out.append({
+            "sql": (entry.get("sql") or "").strip(),
+            "explanation": entry.get("explanation") or "",
+        })
+    return out
+
+
+@app.post("/api/repair-widgets-batch", response_model=RepairWidgetsBatchResponse)
+async def repair_widgets_batch(request: RepairWidgetsBatchRequest) -> RepairWidgetsBatchResponse:
+    """
+    Repair/review a whole batch of failing widgets/sheets in ONE context-bundle
+    build + ONE LLM call — the batched sibling of /api/repair-widget. Core API
+    collects every probe failure across a plan (dashboard or report) and calls
+    this ONCE instead of one /api/repair-widget round trip per failing item,
+    each of which today rebuilds a full-catalog context bundle.
+
+    Same two per-item modes as /api/repair-widget ("error" / "zero_rows"); a
+    batch may mix modes across items. If an individual item's repaired SQL
+    fails the deterministic safety gate, that item's ORIGINAL sql is returned
+    unchanged (changed=False) instead of failing the whole batch — the caller's
+    re-probe naturally treats it as still-broken and can fall back to
+    /api/repair-widget for just that one item.
+
+    Architecture boundary unchanged: this NEVER executes SQL. The Core API
+    re-verifies every returned SQL against Trino before using it.
+    """
+    if not request.items:
+        return RepairWidgetsBatchResponse(results=[])
+
+    if _widget_sql_provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "SQL repair unavailable — no LLM provider configured "
+                "(LLM_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY, "
+                "whichever matches the configured provider)"
+            ),
+        )
+
+    # Same full-catalog approach as /api/repair-widget: no schema-RAG trim, no
+    # few-shot examples (question=None) — the correct identifier must always
+    # be in scope, and this is ONE bundle build shared across the whole batch
+    # (the entire point of batching).
+    bundle = await build_context_bundle(
+        None,
+        provider=_embed_provider,
+        datasets=request.datasets or None,
+        include_examples=False,
+    )
+    schema_context = render_extra_context(bundle) or "(no schema context provided)"
+
+    try:
+        repairs = await _repair_widgets_batch(_widget_sql_provider, schema_context, request.items)
+    except Exception as e:
+        logger.error(f"Batched widget SQL repair failed: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Batched SQL repair failed: {e}")
+
+    results = []
+    for item, repair in zip(request.items, repairs):
+        candidate_sql = repair["sql"]
+        if candidate_sql:
+            check = validate_and_fix_sql(candidate_sql)
+        else:
+            check = {"is_valid": False, "fixed_sql": item.sql, "issues": ["repair produced no SQL"]}
+
+        if not check["is_valid"]:
+            logger.warning(
+                f"Batched repair for '{item.title or '(untitled)'}' failed safety validation "
+                f"({check['issues']}) — keeping original SQL for the caller's single-item fallback"
+            )
+            results.append(RepairBatchResult(
+                title=item.title, sql=item.sql, changed=False, explanation="",
+            ))
+            continue
+
+        final_sql = check["fixed_sql"]
+        results.append(RepairBatchResult(
+            title=item.title,
+            sql=final_sql,
+            changed=final_sql.strip() != item.sql.strip(),
+            explanation=repair.get("explanation") or "",
+        ))
+
+    logger.info(
+        f"Batched repair: {len(results)} item(s), {sum(1 for r in results if r.changed)} changed"
+    )
+    return RepairWidgetsBatchResponse(results=results)
 
 
 # /api/invalidate-cache removed in Step 1b — the metadata-version watcher

@@ -180,6 +180,10 @@ def make_langchain_model(
     kwargs: dict = {
         "max_retries": settings.llm_max_retries,
         "timeout": settings.llm_timeout_seconds,
+        # Provider default is ~1.0 (unset); the batched/single-shot custom-provider
+        # calls already pin 0.1 for deterministic SQL/JSON. Match that here so the
+        # remaining deepagents caller (chat query planner) isn't the odd one out.
+        "temperature": 0.1,
     }
     if rate_limiter is not None:
         kwargs["rate_limiter"] = rate_limiter

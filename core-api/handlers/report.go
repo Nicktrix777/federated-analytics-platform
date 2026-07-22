@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -430,9 +431,19 @@ type sheetProgress func(title, status string, attempt int, detail string)
 // no sheet survived and the plan must not be persisted.
 //
 // Same two gates as dashboard widgets: the static safety check shared with
-// /api/query, then an executable check against Trino with bounded AI repair.
-// This is what guarantees a downloaded report never carries a sheet whose
-// query cannot run.
+// /api/query, then an executable check against Trino. This is what
+// guarantees a downloaded report never carries a sheet whose query cannot
+// run.
+//
+// ── VERIFY/REPAIR SHAPE (batched-repair driver) ──────────
+// Mirrors DashboardHandler.validatePlanWidgets exactly (see its doc comment
+// for the full rationale): Phase 1 probes every candidate once, concurrently;
+// every failure becomes one item in a single RepairWidgetsBatch call; Phase 2
+// re-probes whatever the batch changed and falls back to the existing
+// single-item verifyAndRepairSheet retry loop for anything the batch didn't
+// fix. report.go has no chart-type step afterward, but it does have one more
+// pass dashboards don't: a batched zero-rows sanity round (repairZeroRowSheets)
+// over whatever survives Phase 2 with a genuinely empty result.
 func (h *ReportHandler) validatePlanSheets(
 	requestID string,
 	plan *models.ReportPlan,
@@ -442,7 +453,10 @@ func (h *ReportHandler) validatePlanSheets(
 		progress = func(string, string, int, string) {}
 	}
 
-	valid := plan.Sheets[:0]
+	// Static safety gate first — cheap, no I/O, stays sequential so dropped-
+	// sheet ordering for safety failures is unaffected by the parallel probe
+	// step below.
+	candidates := make([]models.SheetPlan, 0, len(plan.Sheets))
 	for _, sh := range plan.Sheets {
 		if err := validateRawSQL(sh.SQL); err != nil {
 			log.Printf("report: dropping sheet %q — failed safety check: %v", sh.Title, err)
@@ -453,20 +467,125 @@ func (h *ReportHandler) validatePlanSheets(
 			progress(sh.Title, "dropped", 0, reason)
 			continue
 		}
-		progress(sh.Title, "verifying", 0, "")
-		fixedSQL, err := h.verifyAndRepairSheet(requestID, sh, progress)
-		if err != nil {
-			log.Printf("report: dropping sheet %q — SQL could not be executed after repair: %v", sh.Title, err)
-			reason := "The query didn't run successfully against the data source: " + err.Error()
-			plan.DroppedSheets = append(plan.DroppedSheets, models.DroppedSheet{
-				Title: sh.Title, Reason: reason,
-			})
-			progress(sh.Title, "dropped", 0, reason)
+		candidates = append(candidates, sh)
+	}
+
+	// ── Phase 1: probe every candidate once, concurrently (bounded) ────────
+	probes := make([]probeOutcome, len(candidates))
+	{
+		sem := make(chan struct{}, maxParallelVerify)
+		var wg sync.WaitGroup
+		for i, sh := range candidates {
+			wg.Add(1)
+			go func(i int, sh models.SheetPlan) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				progress(sh.Title, "verifying", 0, "")
+				resp, err := h.verifySheetSQL(requestID, sh.SQL)
+				probes[i] = probeOutcome{resp: resp, err: err}
+			}(i, sh)
+		}
+		wg.Wait()
+	}
+
+	// ── Barrier: one batched repair call for every Phase-1 failure ──────────
+	var failingIdx []int
+	items := make([]services.RepairBatchItem, 0)
+	for i, p := range probes {
+		if p.err == nil {
 			continue
 		}
-		sh.SQL = fixedSQL
-		valid = append(valid, sh)
-		progress(sh.Title, "ok", 0, "")
+		failingIdx = append(failingIdx, i)
+		items = append(items, services.RepairBatchItem{
+			Title: candidates[i].Title,
+			// Reports have no chart type — "table" keeps the repair prompt's
+			// shape-preservation rule aligned with a tabular result.
+			ChartType: "table",
+			SQL:       candidates[i].SQL,
+			Error:     p.err.Error(),
+			Mode:      "error",
+		})
+		progress(candidates[i].Title, "repairing", 1, p.err.Error())
+	}
+
+	var batchResults []services.RepairBatchResultItem
+	if len(items) > 0 {
+		var batchErr error
+		batchResults, batchErr = h.aiClient.RepairWidgetsBatch(requestID, items)
+		if batchErr != nil {
+			log.Printf("report: batched repair call failed, falling back to per-sheet repair for %d sheet(s): %v",
+				len(items), batchErr)
+			batchResults = nil
+		}
+	}
+
+	// ── Phase 2: apply the batch fix; fall back to the single-item retry
+	// loop for anything the batch didn't fix. Bounded, concurrent — same
+	// no-lock-needed rationale as the dashboard widget pass.
+	outcomes := make([]sheetOutcome, len(candidates))
+	for i, p := range probes {
+		if p.err == nil {
+			sh := candidates[i]
+			progress(sh.Title, "ok", 0, "")
+			outcomes[i] = sheetOutcome{sheet: &sh, resp: p.resp}
+		}
+	}
+
+	if len(failingIdx) > 0 {
+		sem := make(chan struct{}, maxParallelVerify)
+		var wg sync.WaitGroup
+		for k, i := range failingIdx {
+			wg.Add(1)
+			go func(k, i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				sh := candidates[i]
+				if result, ok := matchBatchRepairResult(items, batchResults, k); ok && result.Changed {
+					if err := validateRawSQL(result.SQL); err != nil {
+						log.Printf("report: batch-repaired SQL for sheet %q failed safety check: %v", sh.Title, err)
+					} else if resp, verr := h.verifySheetSQL(requestID, result.SQL); verr == nil {
+						sh.SQL = result.SQL
+						progress(sh.Title, "ok", 0, "")
+						outcomes[i] = sheetOutcome{sheet: &sh, resp: resp}
+						return
+					}
+				}
+
+				// Batch repair didn't produce a runnable fix — fall back to
+				// the existing single-item retry loop for just this straggler.
+				fixedSQL, resp, err := h.verifyAndRepairSheet(requestID, sh, progress)
+				if err != nil {
+					log.Printf("report: dropping sheet %q — SQL could not be executed after repair: %v", sh.Title, err)
+					reason := "The query didn't run successfully against the data source: " + err.Error()
+					progress(sh.Title, "dropped", 0, reason)
+					outcomes[i] = sheetOutcome{reason: reason}
+					return
+				}
+				sh.SQL = fixedSQL
+				progress(sh.Title, "ok", 0, "")
+				outcomes[i] = sheetOutcome{sheet: &sh, resp: resp}
+			}(k, i)
+		}
+		wg.Wait()
+	}
+
+	// ── Phase 3: batched zero-rows sanity pass ──────────────────────────────
+	// Report-only — dashboards don't get this per the plan.
+	h.repairZeroRowSheets(requestID, outcomes, progress)
+
+	valid := make([]models.SheetPlan, 0, len(candidates))
+	for i, o := range outcomes {
+		if o.sheet != nil {
+			valid = append(valid, *o.sheet)
+			continue
+		}
+		plan.DroppedSheets = append(plan.DroppedSheets, models.DroppedSheet{
+			Title: candidates[i].Title, Reason: o.reason,
+		})
 	}
 	plan.Sheets = valid
 	if len(plan.Sheets) == 0 {
@@ -485,22 +604,112 @@ func (h *ReportHandler) validatePlanSheets(
 	return nil
 }
 
+// repairZeroRowSheets runs one batched mode="zero_rows" repair round for
+// every surviving sheet (outcomes[i].sheet != nil) whose final Phase-2 probe
+// succeeded with RowCount == 0 — mirroring query.go's handleZeroRow
+// semantics, batched across sheets instead of the single-item loop the
+// chat/query path uses.
+//
+// Unlike the error-mode passes above, this never drops a sheet: a report
+// sheet can legitimately have zero matching rows. The batch response's
+// Changed flag does the job query.go's handleZeroRow does with a trimmed
+// string compare — Changed == false means the AI Engine is confirming zero
+// rows is correct, so the sheet is left exactly as it was. When Changed is
+// true, the correction is re-probed and kept only if it now returns rows;
+// otherwise the original zero-row result stands.
+func (h *ReportHandler) repairZeroRowSheets(
+	requestID string,
+	outcomes []sheetOutcome,
+	progress sheetProgress,
+) {
+	var zeroIdx []int
+	items := make([]services.RepairBatchItem, 0)
+	for i, o := range outcomes {
+		if o.sheet == nil || o.resp == nil || o.resp.RowCount != 0 {
+			continue
+		}
+		zeroIdx = append(zeroIdx, i)
+		items = append(items, services.RepairBatchItem{
+			Title:     o.sheet.Title,
+			ChartType: "table",
+			SQL:       o.sheet.SQL,
+			Mode:      "zero_rows",
+		})
+	}
+	if len(items) == 0 {
+		return
+	}
+
+	results, err := h.aiClient.RepairWidgetsBatch(requestID, items)
+	if err != nil {
+		log.Printf("report: zero-row batched repair call failed, leaving %d sheet(s) as-is: %v", len(items), err)
+		return
+	}
+
+	sem := make(chan struct{}, maxParallelVerify)
+	var wg sync.WaitGroup
+	for k, i := range zeroIdx {
+		wg.Add(1)
+		go func(k, i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			sh := *outcomes[i].sheet
+			result, ok := matchBatchRepairResult(items, results, k)
+			if !ok || !result.Changed {
+				// AI confirms zero rows is correct (or the batch had nothing
+				// usable for this sheet) — leave the original result in place.
+				return
+			}
+			if err := validateRawSQL(result.SQL); err != nil {
+				log.Printf("report: zero-row corrected SQL for sheet %q failed safety check: %v", sh.Title, err)
+				return
+			}
+			resp, execErr := h.verifySheetSQL(requestID, result.SQL)
+			if execErr != nil || resp.RowCount == 0 {
+				log.Printf("report: zero-row correction for sheet %q did not improve the result (err=%v)", sh.Title, execErr)
+				return
+			}
+			log.Printf("report: zero-row correction for sheet %q produced %d rows", sh.Title, resp.RowCount)
+			sh.SQL = result.SQL
+			outcomes[i] = sheetOutcome{sheet: &sh, resp: resp}
+			progress(sh.Title, "ok", 0, "")
+		}(k, i)
+	}
+	wg.Wait()
+}
+
+// sheetOutcome is one candidate sheet's result from the verify/repair pass —
+// sheet is nil when the sheet was dropped, in which case reason explains why.
+// resp carries the sheet's final successful probe, used by
+// repairZeroRowSheets; nil exactly when sheet is nil.
+type sheetOutcome struct {
+	sheet  *models.SheetPlan
+	resp   *models.ExecuteResponse
+	reason string
+}
+
 // verifyAndRepairSheet runs a sheet's SQL against the Query Service exactly
-// as the download will. If it executes, the (possibly unchanged) SQL is
-// returned with a nil error. If it fails, the SQL and the engine error are
-// sent to the AI Engine for a focused repair (up to maxSheetRepairAttempts),
-// each attempt re-verified against Trino. Returns a non-nil error only when
-// no runnable SQL could be produced — the caller then drops the sheet and
-// surfaces this error as the reason.
+// as the download will. If it executes, the (possibly unchanged) SQL and its
+// probe response are returned with a nil error. If it fails, the SQL and the
+// engine error are sent to the AI Engine for a focused repair (up to
+// maxSheetRepairAttempts), each attempt re-verified against Trino. Returns a
+// non-nil error only when no runnable SQL could be produced — the caller
+// then drops the sheet and surfaces this error as the reason.
+//
+// This is the residual single-item repair path: the batched-repair driver in
+// validatePlanSheets calls this only as a fallback for a sheet the one
+// batched /api/repair-widgets-batch call didn't fix.
 func (h *ReportHandler) verifyAndRepairSheet(
 	requestID string,
 	sh models.SheetPlan,
 	progress sheetProgress,
-) (string, error) {
+) (string, *models.ExecuteResponse, error) {
 	sql := sh.SQL
-	execErr := h.verifySheetSQL(requestID, sql)
+	resp, execErr := h.verifySheetSQL(requestID, sql)
 	if execErr == nil {
-		return sql, nil
+		return sql, resp, nil
 	}
 
 	for attempt := 1; attempt <= maxSheetRepairAttempts; attempt++ {
@@ -523,22 +732,26 @@ func (h *ReportHandler) verifyAndRepairSheet(
 		}
 
 		sql = repaired
-		execErr = h.verifySheetSQL(requestID, sql)
+		resp, execErr = h.verifySheetSQL(requestID, sql)
 		if execErr == nil {
 			log.Printf("report: sheet %q repaired successfully on attempt %d", sh.Title, attempt)
-			return sql, nil
+			return sql, resp, nil
 		}
 	}
 
-	return "", execErr
+	return "", nil, execErr
 }
 
-// verifySheetSQL executes a sheet's SQL against the Query Service, returning
-// the execution error (nil on success). This is the same path the download
-// uses, so a query that verifies here is guaranteed to fill its worksheet.
-func (h *ReportHandler) verifySheetSQL(requestID, sql string) error {
-	_, err := h.queryClient.Execute(requestID, sql)
-	return err
+// verifySheetSQL probes a sheet's SQL against the Query Service, returning
+// the probe response (columns + up-to-25-row sample) and the execution error
+// (nil on success). Runs a cheap LIMIT-25 probe (see probeSQL) rather than
+// the full query — a syntax/column/table error surfaces identically either
+// way. HandleDownload runs the real, unprobed query when the workbook is
+// actually built, so a sheet that verifies here is guaranteed to fill its
+// worksheet; it just doesn't pay for the full result set twice. The probe's
+// RowCount also drives the zero-rows sanity pass (repairZeroRowSheets).
+func (h *ReportHandler) verifySheetSQL(requestID, sql string) (*models.ExecuteResponse, error) {
+	return h.queryClient.Execute(requestID, probeSQL(sql))
 }
 
 // persistGeneratedReport creates a new report plus its validated sheets and

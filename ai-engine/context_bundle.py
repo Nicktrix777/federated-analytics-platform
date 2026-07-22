@@ -27,6 +27,7 @@ Nothing here is schema-specific — point the platform at different sources and 
 bundle reshapes itself from live metadata.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -183,18 +184,34 @@ async def build_context_bundle(
       to skip both (widget repair wants the full catalog and no examples).
     - `include_examples`: fetch few-shot examples (only the fast-path system
       prompt renders them; the full pipeline / dashboard / repair don't).
+
+    Dataset-resolution, relationships, lookups, and examples don't depend on
+    each other, so they run concurrently via `asyncio.gather` instead of four
+    sequential awaits — this is the PR-A2 latency fix (~4x fewer round trips
+    serialized into one wall-clock hop).
     """
     emitter = emitter or NullEmitter()
 
-    ds = list(datasets) if datasets else await _load_datasets()
-    if question and ds:
-        ds = await _select_relevant_datasets(ds, question, provider, emitter)
+    async def _resolve_datasets() -> List[DatasetMeta]:
+        ds = list(datasets) if datasets else await _load_datasets()
+        if question and ds:
+            ds = await _select_relevant_datasets(ds, question, provider, emitter)
+        return ds
 
-    relationships = await _load_relationships()
-    lookups = await _load_lookups()
-    examples: List[dict] = []
-    if include_examples and question:
-        examples = await _load_examples(question, provider)
+    async def _maybe_load_examples() -> List[dict]:
+        # Preserve the exact gate: skip the call entirely (not just discard its
+        # result) when examples weren't requested or there's no question to
+        # match against.
+        if include_examples and question:
+            return await _load_examples(question, provider)
+        return []
+
+    ds, relationships, lookups, examples = await asyncio.gather(
+        _resolve_datasets(),
+        _load_relationships(),
+        _load_lookups(),
+        _maybe_load_examples(),
+    )
 
     return ContextBundle(datasets=ds, relationships=relationships, lookups=lookups, examples=examples)
 
@@ -645,6 +662,9 @@ def render_extra_context(bundle: ContextBundle) -> Optional[str]:
     lookups_block = _render_value_lookups(bundle.lookups, bundle.datasets)
     if lookups_block:
         parts.append(lookups_block)
+    examples_block = _render_examples(bundle.examples)
+    if examples_block:
+        parts.append(examples_block)
     return "\n\n".join(parts)
 
 

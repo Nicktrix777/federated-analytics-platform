@@ -124,14 +124,16 @@ class TestStructure:
         assert "CAST(driver_id AS VARCHAR)" in extra
         assert "[JOIN KEY]" in sysp
 
-    def test_examples_only_in_system_prompt(self):
+    def test_examples_render_in_both(self):
         bundle = _bundle(
             [_col("driver_id", "INTEGER")],
             examples=[{"question": "count?", "sql": "SELECT count(*) FROM drivers"}],
         )
         assert "Proven Query Examples" in render_fast_path_system_prompt(bundle)
-        # extra_context never renders few-shot examples
-        assert "Proven Query Examples" not in (render_extra_context(bundle) or "")
+        # extra_context renders few-shot examples too (PR-A1) — the report/
+        # dashboard designers and widget repair get the same quality signal
+        # the fast path always had.
+        assert "Proven Query Examples" in (render_extra_context(bundle) or "")
 
     def test_user_prompt_includes_conversation_block(self):
         from models import ChatMessage

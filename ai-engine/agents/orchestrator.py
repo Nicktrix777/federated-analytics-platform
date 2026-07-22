@@ -33,6 +33,7 @@ import re
 from typing import Optional
 
 from deepagents import create_deep_agent
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 from llm.providers import make_langchain_model
@@ -202,6 +203,17 @@ async def generate_query_plan(
             return clarification
         return _build_query_plan(plan_data, question)
 
+    except GraphRecursionError:
+        # The agent wandered past agent_recursion_limit hops without settling on
+        # an answer. No partial state is recoverable here (astream_events raises
+        # before a final on_chain_end fires — see run_agent's docstring), so the
+        # only honest response is a clean failure instead of a raw LangGraph
+        # stack trace reaching the caller as a 502.
+        logger.error(f"Query planner exceeded recursion limit for: {question[:100]}")
+        raise ValueError(
+            "The query planner couldn't settle on an answer for this question — "
+            "try rephrasing it more specifically, or breaking it into smaller questions."
+        )
     except Exception as e:
         logger.error(f"Query planner failed: {e}", exc_info=True)
         raise ValueError(f"Query planning failed: {e}")

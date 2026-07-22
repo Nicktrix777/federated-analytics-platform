@@ -1,64 +1,54 @@
 """
-Dashboard Designer — deepagents pipeline for AI dashboard generation.
+Dashboard Designer — deterministic two-call pipeline for AI dashboard generation.
 
-This is the workload the multi-agent architecture exists for: given a
-natural-language brief ("build me a hiring overview dashboard"), the designer
-  1. analyzes the data landscape (delegating to schema-analyst when the
-     pre-loaded context doesn't cover it),
-  2. decides which widgets tell the story (KPI tiles, trends, breakdowns),
-  3. describes each widget's data requirements (no SQL yet),
-  4. returns one DashboardPlan JSON.
+Given a natural-language brief ("build me a hiring overview dashboard"), the
+designer:
+  1. makes ONE structured design call — decides which widgets tell the story
+     (KPI tiles, trends, breakdowns) and describes each widget's data
+     requirements (no SQL yet) — against the schema context the Core API/
+     context_bundle already pre-loaded (no schema-analyst discovery step;
+     that subagent only remains on the chat query-planner path).
+  2. writes the Trino SQL for every widget in ONE follow-up batched call
+     (_generate_widget_sql_batch) instead of one sql-generator subagent round
+     trip per widget.
 
-The Trino SQL for every widget is then written in ONE follow-up call
-(_generate_widget_sql_batch, cheap model) instead of one sql-generator subagent
-round trip per widget — a 7+ widget dashboard used to fan out into 15-30+ gpt-4o
-calls in a couple minutes, which is what was triggering OpenAI 429s.
+No LangGraph, no tools, no ReAct loop on this path — a 6-widget dashboard is
+exactly 2 LLM calls, and GraphRecursionError is structurally impossible here.
+Grid layout is no longer decided by the model; Core API assigns it
+deterministically after verification (see docs/ux-workflow-overhaul-plan.md).
 
-The same agent also REFINES an existing dashboard: when the request carries
+The same function also REFINES an existing dashboard: when the request carries
 the current dashboard state, the instruction is applied to it and the full
 updated plan is returned ("alter it in natural language").
 
 Latency note: a dashboard is generated once and refined occasionally, so this
-path deliberately uses the full pipeline — there is no fast path here.
+path deliberately favors quality over the fast-path's single-call brevity —
+there is no fast path here, just fewer/cheaper calls than the old ReAct loop.
 """
 
 import json
 import logging
 from typing import Optional
 
-from deepagents import create_deep_agent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from llm.providers import make_langchain_model
-from agents.orchestrator import _extract_json_from_files, _extract_json_plan, _normalize_content, run_agent
-from events import EventEmitter
-from agents.subagents.schema_analyst import build_schema_analyst_subagent
+from events import EventEmitter, NullEmitter
 from agents.subagents.sql_generator import SQL_GENERATOR_SYSTEM_PROMPT
-from agents.tools.schema_tools import list_available_sources
-from config import settings
 from models import DashboardPlan, WidgetPlan
 from llm.openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
 
 
-# Passed to create_deep_agent as response_format=. This is the actual fix for
-# the designer's final answer sometimes being prose instead of JSON (or, per
-# deepagents' own filesystem-eviction behavior, a virtual file) — with
-# response_format set, the framework runs a dedicated structured-output step
-# after the ReAct loop finishes, enforced by the API itself, instead of
-# trusting the model to voluntarily end its chat reply with clean JSON.
-class GridPosition(BaseModel):
-    x: int = 0
-    y: int = 0
-    w: int = 6
-    h: int = 4
-
-
+# Validates the design call's JSON before it's trusted — a ValidationError here
+# is the trigger to retry via _structure_widget_design (see generate_dashboard_plan).
+# grid_position is intentionally NOT requested from the model (see
+# DASHBOARD_DESIGN_SYSTEM_PROMPT) — Core API assigns layout deterministically
+# after verification, so it's optional-ignored if a stray value shows up anyway.
 class WidgetDesign(BaseModel):
     title: str
     chart_type: str = "table"
-    grid_position: GridPosition = Field(default_factory=GridPosition)
+    grid_position: Optional[dict] = None
     data_requirements: str = Field(
         default="",
         description=(
@@ -77,86 +67,75 @@ class DashboardDesign(BaseModel):
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     explanation: str = ""
 
-DASHBOARD_DESIGNER_SYSTEM_PROMPT = """You are the Dashboard Designer for a Federated Analytics Platform.
+DASHBOARD_DESIGN_SYSTEM_PROMPT = """You are the Dashboard Designer for a Federated Analytics Platform.
 
 You turn a natural-language brief into a complete analytics dashboard: a set of widgets,
 each backed by a Trino SQL query over the platform's federated data sources.
 
-## Workflow
+## Data available to you
 
-**Step 1 — Understand the data (delegate to schema-analyst, CONDITIONAL)**
-Check the "Additional context" block first — the Core API pre-loads dataset names, Trino
-paths, and columns there. If it already covers what the brief needs, skip schema-analyst.
-Otherwise delegate to schema-analyst to discover the relevant tables and joins.
+The "Additional context" block in the user message is the full pre-loaded schema —
+registered datasets, columns, sample values, and curated join relationships. Use ONLY
+what's there; there is no further schema discovery step in this pipeline.
 
-**Step 2 — Design the widgets**
+## Design the widgets
+
 Pick 4-6 widgets that best answer the brief. Compose a story, not a random set:
 - 2-4 "number" KPI tiles for headline metrics (single row, single numeric column)
 - 1-2 trend charts ("line"/"area") if any time/date column exists
 - 1-2 breakdowns ("bar"/"pie": one category column + one value column, ≤ 12 rows)
 - optionally one detail "table" (LIMIT ≤ 50)
 
-**Step 3 — Describe each widget's data requirements (do NOT write SQL yourself)**
+## Describe each widget's data requirements (do NOT write SQL yourself)
+
 SQL is written afterward, in one separate batched pass outside this conversation — you
 only specify what each widget needs. For every widget, write a precise "data_requirements"
 string: which table(s)/index(es), which exact columns (verbatim from the schema context),
 any joins/unnests, filters, grouping, and ordering needed to produce that widget's shape.
 Be as specific as you'd be briefing a SQL author who has the schema but not your reasoning.
 
-**Step 4 — Lay out the grid**
-The grid is 12 columns wide. No overlaps. Convention:
-- "number" tiles: w=3, h=2, placed left-to-right on the top row (y=0)
-- charts: w=6, h=4, two per row below the tiles
-- "table": w=12, h=4, full width at the bottom
+Grid layout is assigned automatically after this step — do not describe positions.
 
 ## Refinement mode
 
 If the user message contains a "Current dashboard" block, you are EDITING that dashboard,
-not creating one. Apply the instruction (add/remove/change widgets, retitle, re-layout),
-keep everything the user didn't ask to change, and return the FULL updated dashboard.
-
-## Output
-
-Your final answer is captured as structured data (name, description, widgets, confidence,
-explanation) — you don't need to format JSON yourself. Do NOT repeat the schema context
-in your answer — the SQL-writing pass that follows already has it. Keep each widget's
-data_requirements to what's specific to THAT widget.
+not creating one. Apply the instruction (add/remove/change widgets, retitle), keep
+everything the user didn't ask to change, and return the FULL updated dashboard.
 
 ## Rules
-- Use ONLY column names that appear verbatim in the schema context or schema-analyst output.
-  NEVER invent plausible-sounding names — a real column is often shorter or differently named
-  than you'd guess (e.g. a table may have "name" rather than "<entity>_name"). If a column you
-  need isn't listed, delegate to schema-analyst to verify before describing the widget's
-  data_requirements.
-- Shape each widget's data_requirements to its chart type (a "number" tile must yield exactly
-  one value)
+- Use ONLY column names that appear verbatim in the schema context. NEVER invent
+  plausible-sounding names — a real column is often shorter or differently named than
+  you'd guess (e.g. a table may have "name" rather than "<entity>_name").
+- Shape each widget's data_requirements to its chart type (a "number" tile must yield
+  exactly one value)
 - If the brief cannot be served by the available data, return your best partial dashboard
   with confidence below 0.3 and say what's missing in the explanation
-"""
+
+## Response Format
+
+Respond ONLY with raw JSON matching this EXACT schema — no markdown, no code fences, no
+prose before or after:
+{
+  "name": "<short dashboard name>",
+  "description": "<one-sentence description>",
+  "widgets": [
+    {
+      "title": "<widget title>",
+      "chart_type": "<table|bar|line|pie|area|scatter|number|gauge>",
+      "data_requirements": "<precise spec of tables/columns/joins/filters/grouping needed>",
+      "explanation": "<what this widget shows>"
+    }
+  ],
+  "confidence": <0.0 to 1.0>,
+  "explanation": "<how the dashboard answers the brief>"
+}"""
 
 
-def create_dashboard_designer(model: str = "anthropic:claude-sonnet-5", limiters: dict | None = None) -> object:
-    """Create the dashboard designer deepagent."""
-    limiters = limiters or {}
-    resolved_model = make_langchain_model(model, limiters.get("frontier"))
-    return create_deep_agent(
-        model=resolved_model,
-        system_prompt=DASHBOARD_DESIGNER_SYSTEM_PROMPT,
-        tools=[list_available_sources],
-        subagents=[
-            build_schema_analyst_subagent(limiters.get("fast")),
-        ],
-        response_format=DashboardDesign,
-    )
-
-
-# Fallback for when the designer's final chat message isn't parseable JSON (a
-# multi-turn tool-calling agent doesn't reliably obey "JSON only, nothing before
-# or after" — it may add a prose preamble/summary regardless). response_format=
-# json_object is enforced by the OpenAI API itself, so this reformatting call
-# can't fail the way parsing free-form chat text can. If the raw output was cut
-# off mid-thought, build the best dashboard supportable by what IS there and
-# lower confidence accordingly.
+# Fallback for when the design call's JSON doesn't validate against
+# DashboardDesign (missing/malformed fields) — a second, guaranteed-JSON-mode
+# call reformats whatever came back into the exact schema. If the raw output
+# was cut off mid-thought, build the best dashboard supportable by what IS
+# there and lower confidence accordingly.
 STRUCTURE_WIDGET_DESIGN_PROMPT = """You are given a dashboard designer's raw output, which
 describes a set of analytics widgets for a natural-language brief. It may include stray prose
 before/after the structured plan, or may have been cut off before finishing. Reconstruct it
@@ -171,7 +150,6 @@ Respond ONLY with:
     {
       "title": "<widget title>",
       "chart_type": "<table|bar|line|pie|area|scatter|number|gauge>",
-      "grid_position": {"x": 0, "y": 0, "w": 6, "h": 4},
       "data_requirements": "<precise spec of tables/columns/joins/filters/grouping needed>",
       "explanation": "<what this widget shows>"
     }
@@ -182,13 +160,13 @@ Respond ONLY with:
 
 
 async def _structure_widget_design(provider: OpenAIProvider, prompt: str, raw_output: str) -> dict:
-    """Guaranteed-JSON fallback: reformat the designer's raw chat output into the widget schema."""
+    """Guaranteed-JSON fallback: reformat the designer's raw output into the widget schema."""
     user_prompt = f"Original dashboard brief:\n{prompt}\n\nDesigner's raw output to structure:\n{raw_output}"
-    return await provider.generate_json(STRUCTURE_WIDGET_DESIGN_PROMPT, user_prompt)
+    return await provider.generate_json(STRUCTURE_WIDGET_DESIGN_PROMPT, user_prompt, max_tokens=8000)
 
 
-# The designer only decides WHAT each widget needs (see DASHBOARD_DESIGNER_SYSTEM_PROMPT
-# Step 3) — this prompt drives the single follow-up call that writes ALL of the widgets'
+# The design call only decides WHAT each widget needs (see DASHBOARD_DESIGN_SYSTEM_PROMPT)
+# — this prompt drives the single follow-up call that writes ALL of the widgets'
 # SQL at once, replacing what used to be one sql-generator subagent round trip per widget.
 BATCH_SQL_SYSTEM_PROMPT = SQL_GENERATOR_SYSTEM_PROMPT + """
 
@@ -207,7 +185,6 @@ widgets you were given."""
 
 
 async def generate_dashboard_plan(
-    agent,
     prompt: str,
     sql_provider: OpenAIProvider,
     extra_context: Optional[str] = None,
@@ -215,19 +192,20 @@ async def generate_dashboard_plan(
     emitter: Optional[EventEmitter] = None,
 ) -> DashboardPlan:
     """
-    Invoke the dashboard designer and extract a structured DashboardPlan.
+    Design (or refine) a dashboard as a deterministic two-call pipeline.
 
     Args:
-        agent: The compiled deepagent from create_dashboard_designer()
         prompt: The dashboard brief (generate) or instruction (refine)
-        sql_provider: Cheap-model OpenAI client used for the one batched SQL call
+        sql_provider: OpenAI-compatible client used for BOTH the structured
+            design call and the batched widget-SQL call
         extra_context: Pre-loaded schema context from the Core API
         current_dashboard: Existing dashboard state when refining
         emitter: Progress event sink for SSE streaming (NullEmitter if absent)
 
     Raises:
-        ValueError: If the agent output cannot be parsed into a DashboardPlan
+        ValueError: If the design/SQL calls fail or produce no usable widgets
     """
+    emitter = emitter or NullEmitter()
     user_message = prompt
     if current_dashboard:
         user_message += (
@@ -237,34 +215,20 @@ async def generate_dashboard_plan(
     if extra_context:
         user_message += f"\n\nAdditional context:\n{extra_context}"
 
-    logger.info(f"Invoking dashboard designer for: {prompt[:100]}")
+    logger.info(f"Designing dashboard for: {prompt[:100]}")
 
     try:
-        raw_content, files, structured = await run_agent(
-            agent, user_message, emitter=emitter, agent_name="dashboard-designer"
-        )
-        content = _normalize_content(raw_content)
-        logger.debug(f"Designer output (last 500 chars): {content[-500:]}")
-
-        # response_format=DashboardDesign (see create_dashboard_designer) makes this
-        # the normal path — the framework enforces the schema via a dedicated
-        # structured-output step, so this doesn't depend on the model voluntarily
-        # ending its chat reply with clean JSON. The extraction attempts below are
-        # a defensive fallback for the rare case structured_response comes back None.
-        if structured is not None:
-            data = structured.model_dump() if hasattr(structured, "model_dump") else structured
-        else:
-            logger.warning("Designer returned no structured_response — falling back to text extraction")
-            try:
-                data = _extract_json_plan(content, required_key="widgets")
-            except ValueError:
-                data = _extract_json_from_files(files, "widgets")
-            if data is None:
-                logger.warning(
-                    "Designer's final message and virtual files had no parseable "
-                    "JSON — falling back to a guaranteed-JSON structuring pass"
-                )
-                data = await _structure_widget_design(sql_provider, prompt, content)
+        # max_tokens=8000 matches the batched SQL call's headroom (default is
+        # 4000) — a brief that legitimately needs many widgets, each with a
+        # detailed data_requirements spec, can otherwise get cut off mid-JSON.
+        raw = await sql_provider.generate_json(DASHBOARD_DESIGN_SYSTEM_PROMPT, user_message, max_tokens=8000)
+        try:
+            design = DashboardDesign(**raw)
+        except ValidationError as e:
+            logger.warning(f"Dashboard design call didn't match the schema ({e}) — reformatting")
+            reformatted = await _structure_widget_design(sql_provider, prompt, json.dumps(raw))
+            design = DashboardDesign(**reformatted)
+        data = design.model_dump()
 
         widget_designs = data.get("widgets") or []
         if not widget_designs:
@@ -275,15 +239,13 @@ async def generate_dashboard_plan(
         # dataset pre-loaded (Core API sends the full catalog, not just the
         # relevant one), asking the model to echo that back risked truncating
         # the response before the JSON closed.
-        if emitter is not None:
-            await emitter.emit(
-                "stage",
-                stage="widget_sql_started",
-                detail=f"writing SQL for {len(widget_designs)} widgets in one batched call",
-            )
+        await emitter.emit(
+            "stage",
+            stage="widget_sql_started",
+            detail=f"writing SQL for {len(widget_designs)} widgets in one batched call",
+        )
         sql_by_index = await _generate_widget_sql_batch(sql_provider, extra_context or "", widget_designs)
-        if emitter is not None:
-            await emitter.emit("stage", stage="widget_sql_done")
+        await emitter.emit("stage", stage="widget_sql_done")
 
         return _build_dashboard_plan(data, prompt, sql_by_index)
     except Exception as e:
@@ -296,10 +258,11 @@ async def _generate_widget_sql_batch(
 ) -> list:
     """One LLM call that writes SQL for every widget in the plan.
 
-    Returns a list of SQL strings aligned by position with widget_designs.
-    If the model returns fewer/more entries than requested, this pads/truncates
-    defensively rather than raising — a missing widget is dropped downstream
-    instead of failing the whole dashboard.
+    Returns a list of SQL strings aligned to widget_designs by title first
+    (the batch prompt asks for the same "title" back), falling back to
+    position for any entry with no/duplicate title match — this survives the
+    model reordering or dropping an entry instead of misattributing SQL to the
+    wrong widget.
     """
     briefs = [
         {
@@ -321,12 +284,20 @@ async def _generate_widget_sql_batch(
     if len(sql_entries) != len(briefs):
         logger.warning(
             f"Batched widget SQL returned {len(sql_entries)} entries for "
-            f"{len(briefs)} widgets requested — aligning by position."
+            f"{len(briefs)} widgets requested — aligning by title/position."
         )
 
-    sql_list = [(e.get("sql") or "").strip() for e in sql_entries]
-    sql_list += [""] * (len(briefs) - len(sql_list))  # pad missing entries
-    return sql_list[: len(briefs)]  # truncate any extras
+    by_title: dict[str, dict] = {}
+    for e in sql_entries:
+        t = (e.get("title") or "").strip()
+        if t and t not in by_title:
+            by_title[t] = e
+
+    sql_list = []
+    for i, brief in enumerate(briefs):
+        entry = by_title.get(brief["title"]) or (sql_entries[i] if i < len(sql_entries) else {})
+        sql_list.append((entry.get("sql") or "").strip())
+    return sql_list
 
 
 def _build_dashboard_plan(data: dict, prompt: str, sql_by_index: list) -> DashboardPlan:
