@@ -1,7 +1,6 @@
 # Platform Redesign — Metadata Flow + Conversational Query Studio
 
-Status: proposal (design, not yet implemented)
-Author: design session, 2026-07-17
+Status: All 8 redesign PRs have landed (DONE)
 
 ## 1. Why
 
@@ -290,17 +289,17 @@ Pure refactor — the rendering logic already exists.
    (dashboard + widget repair). Column lines with absent/gated samples but a
    detected pattern now render a `[format: <pattern>]` shape hint. Migration
    `0004` drops the legacy `dataset_columns.sample_values`.
-4. **Structured transcript replay.** Replace the `conversation_context` text
+4. **Structured transcript replay. (DONE)** Replace the `conversation_context` text
    blob with a `messages` array persisted in `conversation_turns` and resent per
    turn. Planner stays stateless.
-5. **Clarification as a terminal outcome + `clarification` SSE event.** The
+5. **Clarification as a terminal outcome + `clarification` SSE event. (DONE)** The
    pipeline may return a question instead of a plan; the reply is just the next
    turn. Clarify instead of error. No interrupt, no resume.
 6. **Unify + extend repair (streaming path, zero-row trigger) + "needs
-   curation" queue.** Failures become either self-heal, clarification, or a
+   curation" queue. (DONE)** Failures become either self-heal, clarification, or a
    curation to-do — never a raw banner.
-7. **Frontend transcript UX.** Query Studio becomes conversational.
-8. **`value_lookups`** on top of the now-clean semantic layer.
+7. **Frontend transcript UX. (DONE)** Query Studio becomes conversational.
+8. **`value_lookups` (DONE)** on top of the now-clean semantic layer.
 
 ## 14. Risks / open decisions
 

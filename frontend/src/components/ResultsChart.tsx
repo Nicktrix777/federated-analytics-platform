@@ -1,5 +1,12 @@
 import React, { useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
+import {
+  classifyColumns,
+  autoDetectChartType,
+  toNumber,
+  getChartTheme,
+} from "../lib/chartTheme";
+import { useTheme } from "../theme";
 
 interface ResultsChartProps {
   columns: string[];
@@ -18,104 +25,23 @@ type ChartType = "bar" | "line" | "pie" | "auto";
  */
 const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
   const [userChartType, setUserChartType] = useState<ChartType>("auto");
+  const { theme } = useTheme();
 
   const { chartOption, autoType, hasData } = useMemo(() => {
-    if (rows.length === 0 || columns.length === 0) {
+    // Column roles (numeric/time/categorical, best label column) come from the
+    // shared classifier in lib/chartTheme — the same logic DashboardWidgetCard
+    // uses, so the query-results view and dashboard tiles agree.
+    const cls = classifyColumns(columns, rows);
+    if (!cls.hasData) {
       return { chartOption: null, autoType: "bar" as ChartType, hasData: false };
     }
-
-    // ── Column Classification ──────────────────────────────────
-    // Coerce a value to number, handling Trino's stringified NUMERIC/DECIMAL
-    const toNumber = (v: unknown): number | null => {
-      if (v === null || v === undefined || v === "") return null;
-      if (typeof v === "number") return isNaN(v) ? null : v;
-      if (typeof v === "boolean") return v ? 1 : 0;
-      if (typeof v === "string") {
-        const cleaned = v.replace(/,/g, "").trim();
-        const n = parseFloat(cleaned);
-        return isNaN(n) ? null : n;
-      }
-      return null;
-    };
-
-    const isNumericColumn = (colIdx: number): boolean => {
-      const vals = rows.map((r) => r[colIdx]).filter((v) => v !== null && v !== undefined && v !== "");
-      if (vals.length === 0) return false;
-      const numericCount = vals.filter((v) => toNumber(v) !== null).length;
-      return numericCount / vals.length >= 0.8; // 80%+ numeric values = numeric column
-    };
-
-    const isBooleanColumn = (colIdx: number): boolean => {
-      const vals = rows.map((r) => r[colIdx]).filter((v) => v !== null && v !== undefined && v !== "");
-      if (vals.length === 0) return false;
-      return vals.every((v) => typeof v === "boolean" || v === "true" || v === "false");
-    };
-
-    const isTimeColumn = (colIdx: number): boolean => {
-      const name = columns[colIdx]?.toLowerCase() || "";
-      return /date|year|month|week|time|day|quarter|period/.test(name);
-    };
-
-    const isCategoricalLabel = (colIdx: number): boolean => {
-      if (isNumericColumn(colIdx) || isBooleanColumn(colIdx)) return false;
-      return true;
-    };
-
-    // Classify all columns
-    const numericCols: number[] = [];
-    const categoricalCols: number[] = [];
-
-    for (let i = 0; i < columns.length; i++) {
-      if (isBooleanColumn(i)) continue; // Skip booleans for charting
-      if (isNumericColumn(i)) numericCols.push(i);
-      else if (isCategoricalLabel(i)) categoricalCols.push(i);
-    }
-
-    if (numericCols.length === 0) {
-      return { chartOption: null, autoType: "bar" as ChartType, hasData: false };
-    }
-
-    // Pick best label column: prefer categorical columns with meaningful names
-    const labelPreferenceKeywords = ["name", "department", "category", "region", "title", "label", "type", "group", "status", "project", "period", "quarter"];
-    // Only use categoricalCols for labeling — never a numeric col
-    let labelColIdx: number | null = categoricalCols[0] ?? null;
-    for (const keyword of labelPreferenceKeywords) {
-      const found = categoricalCols.find((i) => columns[i]?.toLowerCase().includes(keyword));
-      if (found !== undefined) { labelColIdx = found; break; }
-    }
-
-    // Time series detection
-    const hasTimeAxis = categoricalCols.some((i) => isTimeColumn(i));
-    const firstNumIdx = numericCols[0];
-
-    // Auto-detect chart type
-    let autoType: ChartType = "bar";
-    const total = rows.reduce((sum, r) => sum + (toNumber(r[firstNumIdx]) ?? 0), 0);
-    const isPieable =
-      rows.length <= 10 &&
-      rows.length >= 2 &&
-      total > 0 &&
-      rows.every((r) => (toNumber(r[firstNumIdx]) ?? 0) >= 0) &&
-      numericCols.length === 1 &&
-      labelColIdx !== null; // Need a real categorical label for pie
-
-    if (hasTimeAxis) autoType = "line";
-    else if (isPieable) autoType = "pie";
-    else autoType = "bar";
-
-    // Coral monochrome ramp — a single-hue palette so charts read as one
-    // color system (matches the v3 single-accent UI). Cycles for multi-series
-    // and for per-row single-series bars.
-    const baseColors = [
-      "#d4816a", "#eb9c83", "#b5674f", "#f4c2b1",
-      "#8f4d39", "#c9765d", "#e0a892", "#6b3829",
-    ];
-    // Shared dark-theme chart chrome.
-    const AXIS = "#8a827b";
-    const GRID = "rgba(255,255,255,0.06)";
-    const AXIS_LINE = "rgba(255,255,255,0.12)";
-    const TOOLTIP_BG = "rgba(8,8,9,0.96)";
-    const accentFade = (o: number) => `rgba(212,129,106,${o})`;
+    const { numericCols, labelColIdx, firstNumIdx } = cls;
+    const autoType: ChartType = autoDetectChartType(rows, cls);
+    // Theme-aware palette + chrome; recomputed when `theme` toggles (see deps).
+    const ct = getChartTheme();
+    const baseColors = ct.ramp;
+    const AXIS = ct.axis, GRID = ct.grid, AXIS_LINE = ct.axisLine, TOOLTIP_BG = ct.tooltipBg, TEXT = ct.text;
+    const accentFade = ct.accentFade;
 
     const effectiveType = userChartType === "auto" ? autoType : userChartType;
 
@@ -136,12 +62,15 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
         hasData: true,
         chartOption: {
           backgroundColor: "transparent",
+          animation: true,
+          animationDuration: 1000,
+          animationEasing: "cubicOut",
           tooltip: {
             trigger: "item",
             formatter: "{b}: {c} ({d}%)",
             backgroundColor: TOOLTIP_BG,
             borderColor: AXIS_LINE,
-            textStyle: { color: "#f2efea" },
+            textStyle: { color: TEXT },
           },
           legend: {
             orient: "vertical",
@@ -190,11 +119,14 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
         hasData: true,
         chartOption: {
           backgroundColor: "transparent",
+          animation: true,
+          animationDuration: 1000,
+          animationEasing: "cubicOut",
           tooltip: {
             trigger: "axis",
             backgroundColor: TOOLTIP_BG,
             borderColor: AXIS_LINE,
-            textStyle: { color: "#f2efea", fontSize: 12 },
+            textStyle: { color: TEXT, fontSize: 12 },
           },
           legend: numericCols.length > 1 ? {
             textStyle: { color: AXIS, fontSize: 11 },
@@ -250,12 +182,15 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
         hasData: true,
         chartOption: {
           backgroundColor: "transparent",
+          animation: true,
+          animationDuration: 1000,
+          animationEasing: "cubicOut",
           tooltip: {
             trigger: "axis",
             axisPointer: { type: "shadow" },
             backgroundColor: TOOLTIP_BG,
             borderColor: AXIS_LINE,
-            textStyle: { color: "#f2efea", fontSize: 12 },
+            textStyle: { color: TEXT, fontSize: 12 },
           },
           legend: numericCols.length > 1 ? { textStyle: { color: AXIS, fontSize: 11 } } : undefined,
           grid: { left: "3%", right: numericCols.length === 1 ? "12%" : "5%", bottom: "5%", top: numericCols.length > 1 ? "12%" : "5%", containLabel: true },
@@ -285,12 +220,15 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
       hasData: true,
       chartOption: {
         backgroundColor: "transparent",
+        animation: true,
+        animationDuration: 1000,
+        animationEasing: "cubicOut",
         tooltip: {
           trigger: "axis",
           axisPointer: { type: "shadow" },
           backgroundColor: TOOLTIP_BG,
           borderColor: AXIS_LINE,
-          textStyle: { color: "#f2efea", fontSize: 12 },
+          textStyle: { color: TEXT, fontSize: 12 },
         },
         legend: numericCols.length > 1 ? { textStyle: { color: AXIS, fontSize: 11 } } : undefined,
         grid: { left: "3%", right: "4%", bottom: "15%", top: numericCols.length > 1 ? "15%" : "5%", containLabel: true },
@@ -308,7 +246,7 @@ const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
         series,
       },
     };
-  }, [columns, rows, userChartType]);
+  }, [columns, rows, userChartType, theme]);
 
   if (!hasData || !chartOption) {
     return (

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { dataSourcesApi } from "../api/client";
 import type { DataSource, CreateDataSourcePayload } from "../types";
+import { Button, Modal, Banner, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
+import { useToast } from "../components/ui/Toast";
 
 const SOURCE_TYPE_ICONS: Record<string, string> = {
   postgresql: "🐘",
@@ -41,6 +43,7 @@ const DEFAULT_FORM: FormState = {
 };
 
 export default function DataSourcesPage() {
+  const toast = useToast();
   const [sources, setSources] = useState<DataSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -50,7 +53,8 @@ export default function DataSourcesPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedSchemaId, setExpandedSchemaId] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  // ConfirmDialog state
+  const [confirmDelete, setConfirmDelete] = useState<{ id: number; name: string } | null>(null);
 
   const loadSources = useCallback(async () => {
     try {
@@ -95,6 +99,7 @@ export default function DataSourcesPage() {
       setShowModal(false);
       setForm(DEFAULT_FORM);
       await loadSources();
+      toast.success("Data source connected successfully");
     } catch (e: unknown) {
       const err = e as { response?: { data?: { details?: string } }; message?: string };
       setError(err.response?.data?.details || err.message || "Failed to create data source");
@@ -108,9 +113,10 @@ export default function DataSourcesPage() {
     try {
       await dataSourcesApi.refreshSchema(id);
       await loadSources();
+      toast.success("Schema refreshed");
     } catch (e: unknown) {
       const err = e as { message?: string };
-      setError(err.message || "Schema refresh failed");
+      toast.error(err.message || "Schema refresh failed");
     } finally {
       setRefreshingId(null);
     }
@@ -118,8 +124,6 @@ export default function DataSourcesPage() {
 
   const handleSync = async () => {
     setSyncing(true);
-    setSyncMessage(null);
-    setError(null);
     try {
       const result = await dataSourcesApi.syncCatalogs();
       await loadSources();
@@ -130,22 +134,25 @@ export default function DataSourcesPage() {
       if (result.new_datasets.length > 0) {
         parts.push(`${result.new_datasets.length} new dataset(s): ${result.new_datasets.join(", ")}`);
       }
-      setSyncMessage(parts.length > 0 ? parts.join(" — ") : "No new catalogs or tables found");
+      toast.success(parts.length > 0 ? parts.join(" — ") : "No new catalogs or tables found");
     } catch (e: unknown) {
       const err = e as { response?: { data?: { details?: string } }; message?: string };
-      setError(err.response?.data?.details || err.message || "Catalog sync failed");
+      toast.error(err.response?.data?.details || err.message || "Catalog sync failed");
     } finally {
       setSyncing(false);
     }
   };
 
-  const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Remove "${name}" from registered sources?`)) return;
+  const handleDeleteConfirmed = async () => {
+    if (!confirmDelete) return;
     try {
-      await dataSourcesApi.delete(id);
+      await dataSourcesApi.delete(confirmDelete.id);
       await loadSources();
+      toast.success(`"${confirmDelete.name}" removed`);
     } catch {
-      setError("Failed to remove data source");
+      toast.error("Failed to remove data source");
+    } finally {
+      setConfirmDelete(null);
     }
   };
 
@@ -169,58 +176,37 @@ export default function DataSourcesPage() {
           </p>
         </div>
         <div className="ds-header-actions">
-          <button
-            className="btn btn-secondary"
+          <Button
+            variant="secondary"
             onClick={handleSync}
-            disabled={syncing}
+            busy={syncing}
+            busyLabel="Syncing…"
             title="Discover new Trino catalogs and tables/indices (e.g. a newly added Elasticsearch index) without a manual setup step"
           >
-            {syncing ? (
-              <><span className="spinner-sm" /> Syncing...</>
-            ) : (
-              <>⟲ Sync Catalogs</>
-            )}
-          </button>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
+            ⟲ Sync Catalogs
+          </Button>
+          <Button variant="primary" onClick={() => setShowModal(true)}>
             <span>+</span> Connect Source
-          </button>
+          </Button>
         </div>
       </div>
 
       {error && (
-        <div className="ds-error">
-          <span>⚠️ {error}</span>
-          <button onClick={() => setError(null)}>✕</button>
-        </div>
-      )}
-
-      {syncMessage && (
-        <div className="ds-success">
-          <span>✓ {syncMessage}</span>
-          <button onClick={() => setSyncMessage(null)}>✕</button>
-        </div>
+        <Banner kind="error" message={error} onDismiss={() => setError(null)} />
       )}
 
       {loading ? (
-        <div className="ds-loading">
-          <div className="spinner" />
-          <span>Loading data sources...</span>
-        </div>
+        <SkeletonGrid count={3} />
       ) : sources.length === 0 ? (
-        <div className="ds-empty">
-          <div className="ds-empty-icon">🗄️</div>
-          <h3>No data sources registered</h3>
-          <p>
-            Connect your first database, Elasticsearch cluster, or MongoDB
-            instance to start building federated queries.
-          </p>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-            Connect Your First Source
-          </button>
-        </div>
+        <EmptyState
+          icon="🗄️"
+          title="No data sources registered"
+          description="Connect your first database, Elasticsearch cluster, or MongoDB instance to start building federated queries."
+          action={{ label: "Connect Your First Source", onClick: () => setShowModal(true) }}
+        />
       ) : (
         <div className="ds-grid">
-          {sources.map((src) => {
+          {sources.map((src, index) => {
             const schema = parseSchemaCache(src.schema_cache);
             const tableCount = schema?.tables
               ? Object.keys(schema.tables).length
@@ -228,7 +214,11 @@ export default function DataSourcesPage() {
             const isExpanded = expandedSchemaId === src.id;
 
             return (
-              <div key={src.id} className="ds-card">
+              <div 
+                key={src.id} 
+                className="ds-card"
+                style={{ animationDelay: `${index * 30}ms` }}
+              >
                 <div className="ds-card-header">
                   <div className="ds-card-icon">
                     {SOURCE_TYPE_ICONS[src.source_type] ?? "🗄️"}
@@ -319,21 +309,24 @@ export default function DataSourcesPage() {
                 )}
 
                 <div className="ds-card-actions">
-                  <button
-                    className="btn btn-secondary btn-sm"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => handleRefresh(src.id)}
-                    disabled={refreshingId === src.id}
+                    busy={refreshingId === src.id}
+                    busyLabel="Refreshing…"
                     title="Fetch live schema from this source via Trino"
                   >
-                    {refreshingId === src.id ? "⟳ Refreshing..." : "⟳ Refresh Schema"}
-                  </button>
-                  <button
-                    className="btn btn-danger btn-sm"
-                    onClick={() => handleDelete(src.id, src.name)}
+                    ⟳ Refresh Schema
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => setConfirmDelete({ id: src.id, name: src.name })}
                     title="Remove this data source"
                   >
                     Remove
-                  </button>
+                  </Button>
                 </div>
               </div>
             );
@@ -342,146 +335,157 @@ export default function DataSourcesPage() {
       )}
 
       {/* ── Add Data Source Modal ─────────────────────────────── */}
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Connect Data Source</h2>
-              <button
-                className="modal-close"
-                onClick={() => setShowModal(false)}
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSubmit} className="modal-form">
-              <div className="form-group">
-                <label>Source Type</label>
-                <div className="source-type-grid">
-                  {Object.keys(SOURCE_TYPE_ICONS).map((type) => (
-                    <button
-                      key={type}
-                      type="button"
-                      className={`source-type-btn ${form.source_type === type ? "selected" : ""}`}
-                      onClick={() => handleTypeChange(type)}
-                    >
-                      <span className="source-type-icon">
-                        {SOURCE_TYPE_ICONS[type]}
-                      </span>
-                      <span className="source-type-label">{type}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className="form-group">
-                  <label>Connection Name *</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="e.g. Production Postgres"
-                    value={form.name}
-                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Trino Catalog Name *</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="e.g. elasticsearch"
-                    value={form.trino_catalog}
-                    onChange={(e) => setForm((f) => ({ ...f, trino_catalog: e.target.value }))}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className="form-group flex-2">
-                  <label>Host *</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="localhost"
-                    value={form.host}
-                    onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Port *</label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    value={form.port}
-                    onChange={(e) => setForm((f) => ({ ...f, port: Number(e.target.value) }))}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className="form-group">
-                  <label>Database / Index</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder={
-                      form.source_type === "elasticsearch"
-                        ? "Index name (optional)"
-                        : "Database name"
-                    }
-                    value={form.database_name}
-                    onChange={(e) => setForm((f) => ({ ...f, database_name: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div className="form-row">
-                <div className="form-group">
-                  <label>Username</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="Optional"
-                    value={form.username}
-                    onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Password</label>
-                  <input
-                    type="password"
-                    className="form-input"
-                    placeholder="Optional"
-                    value={form.password}
-                    onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              {error && <div className="form-error">{error}</div>}
-
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => setShowModal(false)}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={saving}>
-                  {saving ? "Connecting..." : "Connect & Fetch Schema"}
-                </button>
-              </div>
-            </form>
-          </div>
+      <Modal open={showModal} onClose={() => setShowModal(false)}>
+        <div className="modal-header">
+          <h2>Connect Data Source</h2>
+          <button
+            className="modal-close"
+            onClick={() => setShowModal(false)}
+          >
+            ✕
+          </button>
         </div>
-      )}
+
+        <form onSubmit={handleSubmit} className="modal-form">
+          <div className="form-group">
+            <label>Source Type</label>
+            <div className="source-type-grid">
+              {Object.keys(SOURCE_TYPE_ICONS).map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  className={`source-type-btn ${form.source_type === type ? "selected" : ""}`}
+                  onClick={() => handleTypeChange(type)}
+                >
+                  <span className="source-type-icon">
+                    {SOURCE_TYPE_ICONS[type]}
+                  </span>
+                  <span className="source-type-label">{type}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>Connection Name *</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. Production Postgres"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label>Trino Catalog Name *</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="e.g. elasticsearch"
+                value={form.trino_catalog}
+                onChange={(e) => setForm((f) => ({ ...f, trino_catalog: e.target.value }))}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group flex-2">
+              <label>Host *</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="localhost"
+                value={form.host}
+                onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label>Port *</label>
+              <input
+                type="number"
+                className="form-input"
+                value={form.port}
+                onChange={(e) => setForm((f) => ({ ...f, port: Number(e.target.value) }))}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>Database / Index</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder={
+                  form.source_type === "elasticsearch"
+                    ? "Index name (optional)"
+                    : "Database name"
+                }
+                value={form.database_name}
+                onChange={(e) => setForm((f) => ({ ...f, database_name: e.target.value }))}
+              />
+            </div>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>Username</label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Optional"
+                value={form.username}
+                onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+              />
+            </div>
+            <div className="form-group">
+              <label>Password</label>
+              <input
+                type="password"
+                className="form-input"
+                placeholder="Optional"
+                value={form.password}
+                onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              />
+            </div>
+          </div>
+
+          {error && <div className="form-error">{error}</div>}
+
+          <div className="modal-footer">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setShowModal(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              busy={saving}
+              busyLabel="Connecting…"
+            >
+              Connect &amp; Fetch Schema
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ── Delete Confirm ─────────────────────────────────────── */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Remove data source?"
+        message={`Remove "${confirmDelete?.name ?? ""}" from registered sources? This cannot be undone.`}
+        confirmLabel="Remove"
+        onConfirm={handleDeleteConfirmed}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

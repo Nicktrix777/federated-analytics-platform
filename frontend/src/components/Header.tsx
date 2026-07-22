@@ -1,5 +1,6 @@
 import React from "react";
 import type { DatasetMeta } from "../types";
+import { useTheme } from "../theme";
 
 interface HeaderProps {
   aiEnabled?: boolean;
@@ -18,6 +19,7 @@ const Header: React.FC<HeaderProps> = ({
   onToggleUpload,
   showUpload = false,
 }) => {
+  const { theme, toggle } = useTheme();
   return (
     <header className="header">
       <div className="header-left">
@@ -45,6 +47,15 @@ const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="header-right">
+        <button
+          className="header-btn theme-toggle"
+          onClick={toggle}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+
         {onToggleUpload && (
           <button
             id="upload-btn"

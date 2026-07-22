@@ -1,9 +1,7 @@
 # UX Overhaul + AI Workflow Streamlining Plan
 
 Date: 2026-07-20
-Status: Wave 1 + Wave 2 backend landed 2026-07-21 — **PR-A1 done, PR-B1 done (its deferred
-batched-repair driver was completed by PR-B2), PR-A2 done, PR-B2 done**. All of Track C
-(frontend) — including PR-C1, which was originally scoped into Wave 1 — is still unbuilt.
+Status: All waves landed — **PR-A1 done, PR-B1 done, PR-A2 done, PR-B2 done, PR-C1 done, PR-C2 done, PR-C3 done, PR-C4 done, PR-C5 done**.
 
 Goals (from product feedback):
 

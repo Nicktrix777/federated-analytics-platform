@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { llmSettingsApi } from "../api/client";
 import type { LLMSettingsConfig, LLMSettingsResponse } from "../types";
+import { Button, Banner, Skeleton } from "../components/ui";
 
 // Provider-prefixed model fields grouped by tier. The prefix (before the ":")
 // decides which provider, endpoint, and API key each call uses — switching
@@ -82,9 +83,14 @@ export default function LLMSettingsPage() {
 
   if (loading) {
     return (
-      <div className="ds-loading">
-        <div className="spinner" />
-        <span>Loading LLM settings...</span>
+      <div className="llm-page">
+        <Skeleton height={28} width="240px" />
+        <div style={{ marginTop: 20 }}>
+          <Skeleton height={16} />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Skeleton height={16} width="70%" />
+        </div>
       </div>
     );
   }
@@ -112,16 +118,10 @@ export default function LLMSettingsPage() {
       </p>
 
       {error && (
-        <div className="ds-error">
-          <span>⚠️ {error}</span>
-          <button onClick={() => setError(null)}>✕</button>
-        </div>
+        <Banner kind="error" message={error} onDismiss={() => setError(null)} />
       )}
       {success && (
-        <div className="ds-success">
-          <span>✓ {success}</span>
-          <button onClick={() => setSuccess(null)}>✕</button>
-        </div>
+        <Banner kind="success" message={success} onDismiss={() => setSuccess(null)} />
       )}
 
       {/* Provider API keys — read-only; set in .env, never here */}
@@ -227,12 +227,12 @@ export default function LLMSettingsPage() {
       </div>
 
       <div className="llm-actions">
-        <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-          {saving ? "Saving…" : "Save & apply"}
-        </button>
-        <button className="btn btn-secondary" onClick={load} disabled={saving}>
+        <Button variant="primary" onClick={handleSave} busy={saving} busyLabel="Saving…">
+          Save &amp; apply
+        </Button>
+        <Button variant="secondary" onClick={load} disabled={saving}>
           Reset
-        </button>
+        </Button>
       </div>
     </div>
   );

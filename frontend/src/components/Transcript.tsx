@@ -3,7 +3,7 @@ import type { TranscriptTurn, Clarification } from "../types";
 import QueryPlanView from "./QueryPlan";
 import ResultsTable from "./ResultsTable";
 import ResultsChart from "./ResultsChart";
-import AIProgressTimeline from "./AIProgressTimeline";
+import GenerationProgress from "./GenerationProgress";
 
 // ── Clarification card (PR7) ──────────────────────────────────
 // The AI asked a question instead of guessing. Option buttons answer on the
@@ -87,9 +87,10 @@ const Transcript: React.FC<TranscriptProps> = ({ turns, onClarify }) => {
 
             {/* Pipeline timeline (auto-collapses when the turn is done) */}
             {turn.progress.length > 0 && (
-              <AIProgressTimeline
+              <GenerationProgress
                 events={turn.progress}
                 active={turn.status === "streaming"}
+                mode="query"
               />
             )}
 

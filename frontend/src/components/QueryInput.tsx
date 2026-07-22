@@ -141,8 +141,8 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
               mode === "ai"
                 ? hasResults
                   ? "Refine your analysis…"
-                  : 'Ask anything… e.g., "What are the top 5 products by revenue?"'
-                : "Trino SQL… e.g., SELECT * FROM postgres_source.public.orders LIMIT 10"
+                  : 'Ask anything… e.g., "How many contracts are there by status?"'
+                : `Trino SQL… e.g., SELECT * FROM elasticsearch.default."contracts-v2.40" LIMIT 10`
             }
             rows={hasResults ? 2 : 4}
             disabled={isLoading}
@@ -173,7 +173,7 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
             style={hasResults ? { marginLeft: "auto" } : {}}
           >
             {isLoading ? (
-              <><span className="spinner" />Running…</>
+              <><span className="spinner-btn" />Running…</>
             ) : (
               <><span className="submit-arrow">▶</span>{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
             )}

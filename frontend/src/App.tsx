@@ -4,6 +4,7 @@ import {
   Routes,
   Route,
   NavLink,
+  useLocation,
 } from "react-router-dom";
 import Header from "./components/Header";
 import QueryInput, { QueryInputHandle } from "./components/QueryInput";
@@ -13,6 +14,9 @@ import Transcript from "./components/Transcript";
 import { useQuery } from "./hooks/useQuery";
 import { api } from "./api/client";
 import type { DatasetMeta, QueryMode, ConversationSummary } from "./types";
+import { ToastProvider } from "./components/ui";
+import { Button } from "./components/ui";
+import { ThemeProvider } from "./theme";
 
 // New pages
 import DashboardsListPage from "./pages/DashboardsListPage";
@@ -153,9 +157,9 @@ function QueryPage() {
           <div className="upload-container">
             <div className="upload-header">
               <h2>Upload Dataset</h2>
-              <button className="btn-ghost" onClick={() => setShowUpload(false)}>
+              <Button variant="ghost" onClick={() => setShowUpload(false)}>
                 ✕ Close
-              </button>
+              </Button>
             </div>
             <FileUpload onUploadSuccess={handleUploadSuccess} />
           </div>
@@ -194,25 +198,39 @@ function QueryPage() {
   );
 }
 
+// ── Route Transition Wrapper ──────────────────────────────────
+function AnimatedRoutes() {
+  const location = useLocation();
+  return (
+    <div key={location.pathname} className="page-transition-enter">
+      <Routes location={location}>
+        <Route path="/" element={<QueryPage />} />
+        <Route path="/dashboards" element={<DashboardsListPage />} />
+        <Route path="/dashboards/:id" element={<DashboardBuilderPage />} />
+        <Route path="/reports" element={<ReportsListPage />} />
+        <Route path="/reports/:id" element={<ReportDetailPage />} />
+        <Route path="/datasources" element={<DataSourcesPage />} />
+        <Route path="/settings" element={<LLMSettingsPage />} />
+      </Routes>
+    </div>
+  );
+}
+
 // ── Root App with Router ──────────────────────────────────────
 const App: React.FC = () => {
   return (
     <BrowserRouter>
-      <div className="app-shell">
-        <Header />
-        <NavBar />
-        <div className="page-content">
-          <Routes>
-            <Route path="/" element={<QueryPage />} />
-            <Route path="/dashboards" element={<DashboardsListPage />} />
-            <Route path="/dashboards/:id" element={<DashboardBuilderPage />} />
-            <Route path="/reports" element={<ReportsListPage />} />
-            <Route path="/reports/:id" element={<ReportDetailPage />} />
-            <Route path="/datasources" element={<DataSourcesPage />} />
-            <Route path="/settings" element={<LLMSettingsPage />} />
-          </Routes>
-        </div>
-      </div>
+      <ThemeProvider>
+        <ToastProvider>
+          <div className="app-shell">
+            <Header />
+            <NavBar />
+            <div className="page-content">
+              <AnimatedRoutes />
+            </div>
+          </div>
+        </ToastProvider>
+      </ThemeProvider>
     </BrowserRouter>
   );
 };

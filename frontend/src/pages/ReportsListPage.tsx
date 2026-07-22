@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { reportsApi } from "../api/client";
 import { streamAIOperation, SSEConnectionError } from "../api/sse";
-import AIProgressTimeline from "../components/AIProgressTimeline";
+import GenerationProgress from "../components/GenerationProgress";
+import { Button, Modal, Banner, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
+import { useToast } from "../components/ui/Toast";
 import type {
   Report,
   CreateReportPayload,
@@ -13,6 +15,7 @@ import type {
 
 export default function ReportsListPage() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -24,8 +27,11 @@ export default function ReportsListPage() {
   const [generating, setGenerating] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiProgress, setAiProgress] = useState<AIProgressEvent[]>([]);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  // ConfirmDialog state
+  const [confirmDelete, setConfirmDelete] = useState<{ id: number; name: string } | null>(null);
 
   const loadReports = useCallback(async () => {
     try {
@@ -66,6 +72,7 @@ export default function ReportsListPage() {
       // report. Falls back to the blocking endpoint if the stream
       // cannot be established.
       try {
+        abortControllerRef.current = new AbortController();
         const terminal = await streamAIOperation(
           "/api/reports/generate/stream",
           { prompt: aiPrompt },
@@ -74,7 +81,8 @@ export default function ReportsListPage() {
             setAiProgress((prev) => [
               ...prev,
               { type, data: (data ?? {}) as AIProgressEventData, ts: Date.now() },
-            ])
+            ]),
+          abortControllerRef.current.signal
         );
 
         if (terminal.type === "error") {
@@ -117,6 +125,10 @@ export default function ReportsListPage() {
         },
       });
     } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        setAiError("Report generation cancelled.");
+        return;
+      }
       const detail =
         (err as { response?: { data?: { error?: string; details?: string } } })
           .response?.data;
@@ -128,6 +140,12 @@ export default function ReportsListPage() {
       );
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleCancelGenerate = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
     }
   };
 
@@ -147,10 +165,17 @@ export default function ReportsListPage() {
     }
   };
 
-  const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Delete report "${name}"? This will remove all sheets.`)) return;
-    await reportsApi.delete(id);
-    await loadReports();
+  const handleDeleteConfirmed = async () => {
+    if (!confirmDelete) return;
+    try {
+      await reportsApi.delete(confirmDelete.id);
+      await loadReports();
+      toast.success(`"${confirmDelete.name}" deleted`);
+    } catch {
+      toast.error("Failed to delete report");
+    } finally {
+      setConfirmDelete(null);
+    }
   };
 
   return (
@@ -163,42 +188,39 @@ export default function ReportsListPage() {
           </p>
         </div>
         <div className="dl-header-actions">
-          <button className="btn btn-primary" onClick={() => setShowAIModal(true)}>
+          <Button variant="primary" onClick={() => setShowAIModal(true)}>
             ✨ Generate with AI
-          </button>
-          <button className="btn btn-ghost" onClick={() => setShowModal(true)}>
+          </Button>
+          <Button variant="ghost" onClick={() => setShowModal(true)}>
             + New Report
-          </button>
+          </Button>
         </div>
       </div>
 
       {downloadError && (
-        <div className="ds-error">
-          <span>⚠️ {downloadError}</span>
-          <button onClick={() => setDownloadError(null)}>✕</button>
-        </div>
+        <Banner
+          kind="error"
+          message={downloadError}
+          onDismiss={() => setDownloadError(null)}
+        />
       )}
 
       {loading ? (
-        <div className="ds-loading">
-          <div className="spinner" />
-          <span>Loading reports...</span>
-        </div>
+        <SkeletonGrid count={4} />
       ) : reports.length === 0 ? (
-        <div className="ds-empty">
-          <div className="ds-empty-icon">📑</div>
-          <h3>No reports yet</h3>
-          <p>Create your first report to start delivering formatted Excel workbooks.</p>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-            Create Report
-          </button>
-        </div>
+        <EmptyState
+          icon="📑"
+          title="No reports yet"
+          description="Create your first report to start delivering formatted Excel workbooks."
+          action={{ label: "Create Report", onClick: () => setShowModal(true) }}
+        />
       ) : (
         <div className="dl-grid">
-          {reports.map((r) => (
+          {reports.map((r, index) => (
             <div
               key={r.id}
               className="dl-card"
+              style={{ animationDelay: `${index * 30}ms` }}
               onClick={() => navigate(`/reports/${r.id}`)}
             >
               <div className="dl-card-icon">📑</div>
@@ -212,141 +234,154 @@ export default function ReportsListPage() {
                 </div>
               </div>
               <div className="dl-card-actions">
-                <button
-                  className="btn btn-ghost btn-sm"
-                  onClick={(e) => {
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={(e: React.MouseEvent) => {
                     e.stopPropagation();
                     navigate(`/reports/${r.id}`);
                   }}
                 >
                   Open →
-                </button>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  disabled={downloadingId === r.id}
-                  onClick={(e) => {
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  busy={downloadingId === r.id}
+                  busyLabel="Preparing…"
+                  onClick={(e: React.MouseEvent) => {
                     e.stopPropagation();
                     handleDownload(r.id);
                   }}
                 >
-                  {downloadingId === r.id ? (
-                    <><span className="spinner-sm" /> Preparing…</>
-                  ) : (
-                    "⬇ Download"
-                  )}
-                </button>
-                <button
-                  className="btn btn-danger btn-sm"
-                  onClick={(e) => {
+                  ⬇ Download
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={(e: React.MouseEvent) => {
                     e.stopPropagation();
-                    handleDelete(r.id, r.name);
+                    setConfirmDelete({ id: r.id, name: r.name });
                   }}
                 >
                   Delete
-                </button>
+                </Button>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {showAIModal && (
-        <div className="modal-overlay" onClick={() => !generating && setShowAIModal(false)}>
-          <div className="modal-box modal-lg" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>✨ Generate Report with AI</h2>
-              <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
-            </div>
-            <form onSubmit={handleGenerate} className="modal-form">
-              <div className="form-group">
-                <label>Describe the report you want *</label>
-                <textarea
-                  className="form-input"
-                  placeholder={
-                    "e.g. A monthly workforce report: a summary sheet with headcount " +
-                    "and salary KPIs, salary detail by department, and task completion " +
-                    "per employee."
-                  }
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  rows={4}
-                  required
-                  autoFocus
-                  disabled={generating}
-                />
-              </div>
-              <p className="form-hint">
-                The AI analyzes all registered data sources and schemas, designs the sheets,
-                and writes the queries. You can edit every sheet or refine the report with
-                further instructions afterwards.
-              </p>
-              {generating && (
-                <AIProgressTimeline
-                  events={aiProgress}
-                  active
-                  title="Designing report"
-                />
-              )}
-              {aiError && <div className="form-error">{aiError}</div>}
-              <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={generating || !aiPrompt.trim()}>
-                  {generating ? (
-                    <><span className="spinner-sm" /> Designing report…</>
-                  ) : (
-                    "Generate Report"
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
+      {/* ── Generate AI Report Modal ───────────────────────────── */}
+      <Modal
+        open={showAIModal}
+        onClose={() => !generating && setShowAIModal(false)}
+        persistent={generating}
+        boxClass="modal-lg"
+      >
+        <div className="modal-header">
+          <h2>✨ Generate Report with AI</h2>
+          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
         </div>
-      )}
+        <form onSubmit={handleGenerate} className="modal-form">
+          <div className="form-group">
+            <label>Describe the report you want *</label>
+            <textarea
+              className="form-input"
+              placeholder={
+                "e.g. A monthly contracts report from the Elasticsearch contracts " +
+                "index: a summary sheet of contract counts by status, contracts by " +
+                "kind, and a detail sheet of recent contracts with document number."
+              }
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              rows={4}
+              required
+              autoFocus
+              disabled={generating}
+            />
+          </div>
+          <p className="form-hint">
+            The AI analyzes all registered data sources and schemas, designs the sheets,
+            and writes the queries. You can edit every sheet or refine the report with
+            further instructions afterwards.
+          </p>
+          {aiProgress.length > 0 && (
+            <GenerationProgress
+              events={aiProgress}
+              active={generating}
+              mode="report"
+              title="Designing report"
+              onCancel={handleCancelGenerate}
+            />
+          )}
+          {aiError && <div className="form-error">{aiError}</div>}
+          <div className="modal-footer">
+            <Button variant="ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              busy={generating}
+              busyLabel="Designing report…"
+              disabled={generating || !aiPrompt.trim()}
+            >
+              Generate Report
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>New Report</h2>
-              <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
-            </div>
-            <form onSubmit={handleCreate} className="modal-form">
-              <div className="form-group">
-                <label>Report Name *</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="e.g. Monthly Revenue Report"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  required
-                  autoFocus
-                />
-              </div>
-              <div className="form-group">
-                <label>Description</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Optional description"
-                  value={formDesc}
-                  onChange={(e) => setFormDesc(e.target.value)}
-                />
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setShowModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={creating}>
-                  {creating ? "Creating..." : "Create Report"}
-                </button>
-              </div>
-            </form>
-          </div>
+      {/* ── New Report Modal ───────────────────────────────────── */}
+      <Modal open={showModal} onClose={() => setShowModal(false)}>
+        <div className="modal-header">
+          <h2>New Report</h2>
+          <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
         </div>
-      )}
+        <form onSubmit={handleCreate} className="modal-form">
+          <div className="form-group">
+            <label>Report Name *</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="e.g. Monthly Revenue Report"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              required
+              autoFocus
+            />
+          </div>
+          <div className="form-group">
+            <label>Description</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Optional description"
+              value={formDesc}
+              onChange={(e) => setFormDesc(e.target.value)}
+            />
+          </div>
+          <div className="modal-footer">
+            <Button variant="ghost" onClick={() => setShowModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" busy={creating} busyLabel="Creating…">
+              Create Report
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ── Delete Confirm ─────────────────────────────────────── */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete report?"
+        message={`Delete "${confirmDelete?.name ?? ""}"? This will remove all sheets.`}
+        confirmLabel="Delete"
+        onConfirm={handleDeleteConfirmed}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

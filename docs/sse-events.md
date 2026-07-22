@@ -26,7 +26,7 @@ Optional `X-Request-ID` header is echoed into every event.
 
 | event | payload fields | meaning |
 |---|---|---|
-| `stage` | `stage`, `detail?` | Pipeline checkpoint. Stages: `schema_retrieval` (detail = "selected N/M datasets by relevance"; emitted when schema-RAG trims the catalog), `fast_path_started`, `fast_path_rejected` (detail = reason), `pipeline_started`, `subagent_started`, `subagent_finished`, `widget_sql_started`, `widget_sql_done`, `sheet_sql_started`, `sheet_sql_done`, `validating` |
+| `stage` | `stage`, `detail?` | Pipeline checkpoint. Stages: `schema_retrieval` (detail = "selected N/M datasets by relevance"; emitted when schema-RAG trims the catalog), `fast_path_started`, `fast_path_rejected` (detail = reason), `pipeline_started`, `subagent_started`, `subagent_finished`, `widget_sql_started`, `widget_sql_done`, `sheet_sql_started`, `sheet_sql_done`, `validating`, `persisting` |
 | `llm` | `phase` ("start"/"end"), `agent`, `model?`, `duration_ms?`, `input_tokens?`, `output_tokens?` | One LLM call inside the pipeline. `agent` is who made it: `fast-path`, `query-planner`, `dashboard-designer`, `report-designer`, `schema-analyst`, `sql-generator` |
 | `tool` | `phase` ("start"/"end"), `tool`, `agent`, `args?`, `duration_ms?` | One agent tool call (schema lookups etc.) |
 | `plan` | `plan` (full QueryPlan JSON), `path` ("fast"/"full") | Terminal success event of `/api/plan/stream` (plan produced) |
@@ -57,8 +57,9 @@ Same auth as the non-streaming routes. The Core API:
 | `stage` | `stage`: `executing_sql` | Plan accepted, SQL sent to the Query Service |
 | `stage` | `stage`: `repairing_sql`, `detail`: `"attempt N/M: <error first line>"` | AI-generated SQL failed; repair attempt in progress. Emitted up to `maxQueryRepairAttempts` times per request (PR6) |
 | `stage` | `stage`: `zero_rows_retry` | SQL ran fine but returned zero rows; trying filter-literal correction (PR6) |
-| `widget` | `title`, `status` ("verifying"/"repairing"/"ok"/"dropped"), `attempt?`, `detail?` | Dashboard flows: per-widget verify/repair progress |
-| `sheet` | `title`, `status` ("verifying"/"repairing"/"ok"/"dropped"), `attempt?`, `detail?` | Report flows: per-sheet verify/repair progress |
+| `widget` | `title`, `status` ("verifying"/"repairing"/"ok"/"dropped"), `attempt?`, `detail?`, `index?`, `total?` | Dashboard flows: per-widget verify/repair progress |
+| `sheet` | `title`, `status` ("verifying"/"repairing"/"ok"/"dropped"), `attempt?`, `detail?`, `index?`, `total?` | Report flows: per-sheet verify/repair progress |
+| `plan_summary` | `titles` (string[]), `total` (number) | Emitted before validation to pre-render the checklist |
 | `result` | full QueryResponse JSON (same shape as `POST /api/query`) | Terminal success event of `/api/query/stream` |
 | `clarification` | full QueryResponse JSON (with `clarification` field set, empty rows) | Terminal event of `/api/query/stream` (clarification needed — PR5; also emitted when repair is exhausted — PR6) |
 | `dashboard` | the persisted dashboard JSON incl. `id` (same shape as the non-streaming response) | Terminal success event of the dashboard streams |

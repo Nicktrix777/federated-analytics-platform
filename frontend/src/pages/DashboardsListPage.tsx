@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { dashboardsApi } from "../api/client";
 import { streamAIOperation, SSEConnectionError } from "../api/sse";
-import AIProgressTimeline from "../components/AIProgressTimeline";
+import GenerationProgress from "../components/GenerationProgress";
+import { Button, Modal, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
+import { useToast } from "../components/ui/Toast";
 import type {
   Dashboard,
   CreateDashboardPayload,
@@ -13,6 +15,7 @@ import type {
 
 export default function DashboardsListPage() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [dashboards, setDashboards] = useState<Dashboard[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -24,6 +27,9 @@ export default function DashboardsListPage() {
   const [generating, setGenerating] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiProgress, setAiProgress] = useState<AIProgressEvent[]>([]);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+  // ConfirmDialog state
+  const [confirmDelete, setConfirmDelete] = useState<{ id: number; name: string } | null>(null);
 
   const loadDashboards = useCallback(async () => {
     try {
@@ -64,6 +70,7 @@ export default function DashboardsListPage() {
       // dashboard. Falls back to the blocking endpoint if the stream
       // cannot be established.
       try {
+        abortControllerRef.current = new AbortController();
         const terminal = await streamAIOperation(
           "/api/dashboards/generate/stream",
           { prompt: aiPrompt },
@@ -72,7 +79,8 @@ export default function DashboardsListPage() {
             setAiProgress((prev) => [
               ...prev,
               { type, data: (data ?? {}) as AIProgressEventData, ts: Date.now() },
-            ])
+            ]),
+          abortControllerRef.current.signal
         );
 
         if (terminal.type === "error") {
@@ -115,6 +123,10 @@ export default function DashboardsListPage() {
         },
       });
     } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        setAiError("Dashboard generation cancelled.");
+        return;
+      }
       const detail =
         (err as { response?: { data?: { error?: string; details?: string } } })
           .response?.data;
@@ -129,10 +141,23 @@ export default function DashboardsListPage() {
     }
   };
 
-  const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Delete dashboard "${name}"? This will remove all widgets.`)) return;
-    await dashboardsApi.delete(id);
-    await loadDashboards();
+  const handleCancelGenerate = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
+  const handleDeleteConfirmed = async () => {
+    if (!confirmDelete) return;
+    try {
+      await dashboardsApi.delete(confirmDelete.id);
+      await loadDashboards();
+      toast.success(`"${confirmDelete.name}" deleted`);
+    } catch {
+      toast.error("Failed to delete dashboard");
+    } finally {
+      setConfirmDelete(null);
+    }
   };
 
   const getWidgetCount = (d: Dashboard) => d.widgets?.length ?? 0;
@@ -147,35 +172,31 @@ export default function DashboardsListPage() {
           </p>
         </div>
         <div className="dl-header-actions">
-          <button className="btn btn-primary" onClick={() => setShowAIModal(true)}>
+          <Button variant="primary" onClick={() => setShowAIModal(true)}>
             ✨ Generate with AI
-          </button>
-          <button className="btn btn-ghost" onClick={() => setShowModal(true)}>
+          </Button>
+          <Button variant="ghost" onClick={() => setShowModal(true)}>
             + New Dashboard
-          </button>
+          </Button>
         </div>
       </div>
 
       {loading ? (
-        <div className="ds-loading">
-          <div className="spinner" />
-          <span>Loading dashboards...</span>
-        </div>
+        <SkeletonGrid count={4} />
       ) : dashboards.length === 0 ? (
-        <div className="ds-empty">
-          <div className="ds-empty-icon">📊</div>
-          <h3>No dashboards yet</h3>
-          <p>Create your first dashboard to start building custom analytics views.</p>
-          <button className="btn btn-primary" onClick={() => setShowModal(true)}>
-            Create Dashboard
-          </button>
-        </div>
+        <EmptyState
+          icon="📊"
+          title="No dashboards yet"
+          description="Create your first dashboard to start building custom analytics views."
+          action={{ label: "Create Dashboard", onClick: () => setShowModal(true) }}
+        />
       ) : (
         <div className="dl-grid">
-          {dashboards.map((d) => (
+          {dashboards.map((d, index) => (
             <div
               key={d.id}
               className="dl-card"
+              style={{ animationDelay: `${index * 30}ms` }}
               onClick={() => navigate(`/dashboards/${d.id}`)}
             >
               <div className="dl-card-icon">📊</div>
@@ -190,126 +211,142 @@ export default function DashboardsListPage() {
                 </div>
               </div>
               <div className="dl-card-actions">
-                <button
-                  className="btn btn-ghost btn-sm"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     navigate(`/dashboards/${d.id}`);
                   }}
                 >
                   Open →
-                </button>
-                <button
-                  className="btn btn-danger btn-sm"
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
-                    handleDelete(d.id, d.name);
+                    setConfirmDelete({ id: d.id, name: d.name });
                   }}
                 >
                   Delete
-                </button>
+                </Button>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {showAIModal && (
-        <div className="modal-overlay" onClick={() => !generating && setShowAIModal(false)}>
-          <div className="modal-box modal-lg" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>✨ Generate Dashboard with AI</h2>
-              <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
-            </div>
-            <form onSubmit={handleGenerate} className="modal-form">
-              <div className="form-group">
-                <label>Describe the dashboard you want *</label>
-                <textarea
-                  className="form-input"
-                  placeholder={
-                    "e.g. A workforce overview: headcount and average salary KPIs, " +
-                    "salary by department, task completion trends, and top performers."
-                  }
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  rows={4}
-                  required
-                  autoFocus
-                  disabled={generating}
-                />
-              </div>
-              <p className="form-hint">
-                The AI analyzes all registered data sources and schemas, designs the widgets,
-                and writes the queries. You can rearrange everything or refine it with further
-                instructions afterwards.
-              </p>
-              {generating && (
-                <AIProgressTimeline
-                  events={aiProgress}
-                  active
-                  title="Designing dashboard"
-                />
-              )}
-              {aiError && <div className="form-error">{aiError}</div>}
-              <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={generating || !aiPrompt.trim()}>
-                  {generating ? (
-                    <><span className="spinner-sm" /> Designing dashboard…</>
-                  ) : (
-                    "Generate Dashboard"
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
+      {/* ── Generate AI Dashboard Modal ────────────────────────── */}
+      <Modal
+        open={showAIModal}
+        onClose={() => !generating && setShowAIModal(false)}
+        persistent={generating}
+        boxClass="modal-lg"
+      >
+        <div className="modal-header">
+          <h2>✨ Generate Dashboard with AI</h2>
+          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
         </div>
-      )}
+        <form onSubmit={handleGenerate} className="modal-form">
+          <div className="form-group">
+            <label>Describe the dashboard you want *</label>
+            <textarea
+              className="form-input"
+              placeholder={
+                "e.g. A contracts overview from the Elasticsearch contracts index: " +
+                "total contracts and active-contract KPIs, contracts by status, " +
+                "contracts by kind, and contracts created per month."
+              }
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              rows={4}
+              required
+              autoFocus
+              disabled={generating}
+            />
+          </div>
+          <p className="form-hint">
+            The AI analyzes all registered data sources and schemas, designs the widgets,
+            and writes the queries. You can rearrange everything or refine it with further
+            instructions afterwards.
+          </p>
+          {aiProgress.length > 0 && (
+            <GenerationProgress
+              events={aiProgress}
+              active={generating}
+              mode="dashboard"
+              title="Designing dashboard"
+              onCancel={handleCancelGenerate}
+            />
+          )}
+          {aiError && <div className="form-error">{aiError}</div>}
+          <div className="modal-footer">
+            <Button variant="ghost" onClick={() => setShowAIModal(false)} disabled={generating}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              busy={generating}
+              busyLabel="Designing dashboard…"
+              disabled={generating || !aiPrompt.trim()}
+            >
+              Generate Dashboard
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>New Dashboard</h2>
-              <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
-            </div>
-            <form onSubmit={handleCreate} className="modal-form">
-              <div className="form-group">
-                <label>Dashboard Name *</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="e.g. Sales Overview"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  required
-                  autoFocus
-                />
-              </div>
-              <div className="form-group">
-                <label>Description</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Optional description"
-                  value={formDesc}
-                  onChange={(e) => setFormDesc(e.target.value)}
-                />
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setShowModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={creating}>
-                  {creating ? "Creating..." : "Create Dashboard"}
-                </button>
-              </div>
-            </form>
-          </div>
+      {/* ── New Dashboard Modal ────────────────────────────────── */}
+      <Modal open={showModal} onClose={() => setShowModal(false)} boxClass="">
+        <div className="modal-header">
+          <h2>New Dashboard</h2>
+          <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
         </div>
-      )}
+        <form onSubmit={handleCreate} className="modal-form">
+          <div className="form-group">
+            <label>Dashboard Name *</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="e.g. Sales Overview"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              required
+              autoFocus
+            />
+          </div>
+          <div className="form-group">
+            <label>Description</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Optional description"
+              value={formDesc}
+              onChange={(e) => setFormDesc(e.target.value)}
+            />
+          </div>
+          <div className="modal-footer">
+            <Button variant="ghost" onClick={() => setShowModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" busy={creating} busyLabel="Creating…">
+              Create Dashboard
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ── Delete Confirm ─────────────────────────────────────── */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="Delete dashboard?"
+        message={`Delete "${confirmDelete?.name ?? ""}"? This will remove all widgets.`}
+        confirmLabel="Delete"
+        onConfirm={handleDeleteConfirmed}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
