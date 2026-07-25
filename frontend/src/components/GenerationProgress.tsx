@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import type { AIProgressEvent, AIProgressEventData } from "../types";
+import { useEffect, useState } from "react";
+import type { AIProgressEvent } from "../types";
 import AIProgressTimeline from "./AIProgressTimeline";
 
 interface GenerationProgressProps {
@@ -10,11 +10,24 @@ interface GenerationProgressProps {
   onCancel?: () => void;
 }
 
-interface StageStatus {
-  state: "pending" | "active" | "done" | "error";
+interface StageDef {
   label: string;
   subLabel?: string;
 }
+
+interface StageSignals {
+  defs: StageDef[];
+  /** Furthest 1-based stage the real events indicate we've reached. */
+  target: number;
+  hasError: boolean;
+}
+
+// Minimum time each stage stays visible so a burst of events (the fast path
+// finishes planning, checks the SQL, and starts executing within ~200ms) still
+// ticks through the stages ONE BY ONE instead of flipping them all to done at once.
+const DWELL_EVENT = 480; // catching up to where real events already are
+const DWELL_IDLE = 1100; // creeping forward before any events arrive (blocking path)
+const DWELL_FINISH = 320; // marching the last stages to done once the run completes
 
 export default function GenerationProgress({
   events,
@@ -25,13 +38,46 @@ export default function GenerationProgress({
 }: GenerationProgressProps) {
   const [showTechnical, setShowTechnical] = useState(false);
 
-  const stages = useMemo(() => {
-    if (mode === "query") {
-      return buildQueryStages(events, active);
+  const sig: StageSignals =
+    mode === "query" ? querySignals(events) : designSignals(events, mode);
+  const N = sig.defs.length;
+  const hasEvents = events.length > 0;
+  const finished = !active;
+
+  // The indicator position advances toward `target`, but never faster than the
+  // dwell time — so stages you'd otherwise never see (because their events
+  // clustered) get a visible moment. It starts at 1 the instant we mount, so a
+  // streaming query shows "Understanding your question" immediately rather than
+  // just a spinning button.
+  const [display, setDisplay] = useState(1);
+
+  let target: number;
+  if (finished && sig.hasError) target = Math.max(1, sig.target || 1);
+  else if (finished) target = N;
+  else if (hasEvents) target = Math.min(sig.target, sig.target >= N ? N : N - 1);
+  else target = N - 1; // no events yet — creep forward, but hold before the last stage
+
+  useEffect(() => {
+    if (display >= target) return;
+    const dwell = finished ? DWELL_FINISH : hasEvents ? DWELL_EVENT : DWELL_IDLE;
+    const id = setTimeout(() => setDisplay((d) => Math.min(d + 1, target)), dwell);
+    return () => clearTimeout(id);
+  }, [display, target, finished, hasEvents]);
+
+  const allDone = finished && !sig.hasError && display >= N;
+
+  const stages = sig.defs.map((def, i) => {
+    const idx = i + 1;
+    let state: "pending" | "active" | "done" | "error";
+    if (sig.hasError && finished) {
+      state = idx < display ? "done" : idx === display ? "error" : "pending";
+    } else if (allDone) {
+      state = "done";
     } else {
-      return buildDesignStages(events, active, mode);
+      state = idx < display ? "done" : idx === display ? "active" : "pending";
     }
-  }, [events, active, mode]);
+    return { ...def, state };
+  });
 
   const totalMs = events.reduce((max, ev) => Math.max(max, ev.data?.elapsed_ms ?? 0), 0);
 
@@ -53,7 +99,9 @@ export default function GenerationProgress({
             </div>
             <div className="gp-stage-text">
               <div className="gp-stage-label">{stage.label}</div>
-              {stage.subLabel && <div className="gp-stage-sub">{stage.subLabel}</div>}
+              {stage.subLabel && stage.state !== "pending" && (
+                <div className="gp-stage-sub">{stage.subLabel}</div>
+              )}
             </div>
           </div>
         ))}
@@ -83,166 +131,95 @@ export default function GenerationProgress({
   );
 }
 
-function buildQueryStages(events: AIProgressEvent[], active: boolean): StageStatus[] {
-  const s1: StageStatus = { state: "pending", label: "Understanding your question" };
-  const s2: StageStatus = { state: "pending", label: "Planning the query" };
-  const s3: StageStatus = { state: "pending", label: "Checking the SQL" };
-  const s4: StageStatus = { state: "pending", label: "Running your query" };
+// ── Signal extraction: turn the raw SSE events into "how far did we get" ──────
+// These no longer bake in pending/active/done — the component's smoothed
+// `display` cursor does that — they only report the furthest real stage reached.
 
-  let currentStage = 1;
+function querySignals(events: AIProgressEvent[]): StageSignals {
+  // Fast path emits only fast_path_started → llm start/end → executing_sql; the
+  // full pipeline adds pipeline_started/validating. Derive progression from
+  // whichever signals arrive so BOTH tick 1→2→3→4.
   let hasError = false;
   let fastPathRejected = false;
   let repairCount = 0;
+  let planningStarted = false;
+  let planningDone = false;
+  let executing = false;
 
   for (const ev of events) {
     if (ev.type === "error" || ev.data?.status === "dropped") hasError = true;
+    if (ev.type === "llm") {
+      if (ev.data?.phase === "start") planningStarted = true;
+      if (ev.data?.phase === "end") planningDone = true;
+    }
     if (ev.type === "stage") {
       const st = ev.data.stage;
-      if (st === "fast_path_started") currentStage = Math.max(currentStage, 1);
       if (st === "fast_path_rejected") fastPathRejected = true;
-      if (st === "pipeline_started") currentStage = Math.max(currentStage, 2);
-      if (st === "validating" || st === "repairing_sql") currentStage = Math.max(currentStage, 3);
-      if (st === "executing_sql") currentStage = Math.max(currentStage, 4);
-      if (st === "repairing_sql") repairCount++;
+      if (st === "pipeline_started") planningStarted = true;
+      if (st === "validating") planningDone = true;
+      if (st === "repairing_sql") { planningDone = true; repairCount++; }
+      if (st === "executing_sql") { planningStarted = true; planningDone = true; executing = true; }
     }
   }
 
-  // Determine s1
-  if (currentStage > 1) s1.state = "done";
-  else if (events.length > 0) s1.state = active ? "active" : "done";
+  let target = 1;
+  if (planningStarted) target = 2;
+  if (planningDone) target = 3;
+  if (executing) target = 4;
 
-  // Determine s2
-  if (currentStage > 2) s2.state = "done";
-  else if (currentStage === 2) {
-    s2.state = active ? "active" : "done";
-    if (fastPathRejected) s2.subLabel = "Thinking harder about this one…";
-  }
+  const defs: StageDef[] = [
+    { label: "Understanding your question" },
+    { label: "Planning the query", subLabel: fastPathRejected ? "Thinking harder about this one…" : undefined },
+    { label: "Checking the SQL", subLabel: repairCount > 0 ? `Fixing a query issue (attempt ${repairCount})` : undefined },
+    { label: "Running your query" },
+  ];
 
-  // Determine s3
-  if (currentStage > 3) s3.state = "done";
-  else if (currentStage === 3) {
-    s3.state = active ? "active" : "done";
-    if (repairCount > 0) s3.subLabel = `Fixing a query issue (attempt ${repairCount})`;
-  }
-
-  // Determine s4
-  if (currentStage > 4 || (!active && !hasError && currentStage >= 4)) s4.state = "done";
-  else if (currentStage === 4) s4.state = active ? "active" : "done";
-
-  if (hasError && active === false) {
-    if (s4.state === "active") s4.state = "error";
-    else if (s3.state === "active") s3.state = "error";
-    else if (s2.state === "active") s2.state = "error";
-    else if (s1.state === "active") s1.state = "error";
-  }
-
-  return [s1, s2, s3, s4];
+  return { defs, target, hasError };
 }
 
-function buildDesignStages(events: AIProgressEvent[], active: boolean, mode: "dashboard" | "report"): StageStatus[] {
+function designSignals(events: AIProgressEvent[], mode: "dashboard" | "report"): StageSignals {
   const itemType = mode === "dashboard" ? "dashboard" : "report";
-  const s1: StageStatus = { state: "pending", label: "Understanding your data" };
-  const s2: StageStatus = { state: "pending", label: `Designing your ${itemType}` };
-  const s3: StageStatus = { state: "pending", label: "Writing the queries" };
-  const s4: StageStatus = { state: "pending", label: "Checking everything against your data" };
-  const s5: StageStatus = { state: "pending", label: "Saving…" };
-
-  let currentStage = 0;
   let hasError = false;
+  let target = 1;
   let llmActive = "";
-  let totalItems = 0;
   let okItems = 0;
   let droppedItems = 0;
+  const itemsSeen = new Set<string>();
 
   for (const ev of events) {
     if (ev.type === "error") hasError = true;
-    if (currentStage === 0) currentStage = 1;
-    
-    if (ev.type === "stage" && ev.data.stage === "pipeline_started") {
-      currentStage = Math.max(currentStage, 2);
-    }
-    if (ev.type === "stage" && (ev.data.stage === "widget_sql_started" || ev.data.stage === "sheet_sql_started")) {
-      currentStage = Math.max(currentStage, 3);
-    }
-    if (ev.type === "stage" && (ev.data.stage === "widget_sql_done" || ev.data.stage === "sheet_sql_done")) {
-      currentStage = Math.max(currentStage, 3); // Will be 4 when validating starts
-    }
-    if (ev.type === "stage" && ev.data.stage === "validating") {
-      currentStage = Math.max(currentStage, 4);
-    }
-    if (ev.type === "stage" && ev.data.stage === "persisting") {
-      currentStage = Math.max(currentStage, 5);
-    }
-    if (ev.type === "dashboard" || ev.type === "report") {
-      // Terminal event
-      currentStage = 6;
+    if (ev.type === "stage" && ev.data.stage === "pipeline_started") target = Math.max(target, 2);
+    if (ev.type === "stage" && (ev.data.stage === "widget_sql_started" || ev.data.stage === "sheet_sql_started")) target = Math.max(target, 3);
+    if (ev.type === "stage" && (ev.data.stage === "widget_sql_done" || ev.data.stage === "sheet_sql_done")) target = Math.max(target, 3);
+    if (ev.type === "stage" && ev.data.stage === "validating") target = Math.max(target, 4);
+    if (ev.type === "stage" && ev.data.stage === "persisting") target = Math.max(target, 5);
+    if (ev.type === "dashboard" || ev.type === "report") target = 5;
+
+    if ((ev.type === "llm" || ev.type === "tool") && ev.data.phase === "start") {
+      llmActive = `Running ${ev.data.agent || ev.data.tool || "agent"}…`;
+    } else if (ev.type === "llm" || ev.type === "tool") {
+      llmActive = "";
     }
 
-    if (ev.type === "llm" || ev.type === "tool") {
-      if (ev.data.phase === "start") {
-        llmActive = `Running ${ev.data.agent || ev.data.tool || "agent"}…`;
-      } else {
-        llmActive = "";
-      }
-    }
-
-    // fallback counting if plan_summary is missing
     if (ev.type === "widget" || ev.type === "sheet") {
-      currentStage = Math.max(currentStage, 4);
-      if (ev.data.status === "verifying") totalItems++;
+      target = Math.max(target, 4);
       if (ev.data.status === "ok") okItems++;
       if (ev.data.status === "dropped") droppedItems++;
+      if (ev.data.title) itemsSeen.add(ev.data.title);
     }
   }
 
-  // Deduplicate total items using a Set of titles if plan_summary is absent
-  const itemsSeen = new Set<string>();
-  let realTotal = 0;
-  for (const ev of events) {
-    if ((ev.type === "widget" || ev.type === "sheet") && ev.data.title) {
-      itemsSeen.add(ev.data.title);
-    }
-  }
-  realTotal = itemsSeen.size;
+  const realTotal = itemsSeen.size;
+  const checked = okItems + droppedItems;
+  const checkSub = realTotal > 0 ? `Checking ${Math.min(checked, realTotal)} of ${realTotal}` : undefined;
 
-  if (currentStage > 1) s1.state = "done";
-  else if (currentStage === 1) s1.state = active ? "active" : "done";
+  const defs: StageDef[] = [
+    { label: "Understanding your data" },
+    { label: `Designing your ${itemType}`, subLabel: llmActive || undefined },
+    { label: "Writing the queries" },
+    { label: "Checking everything against your data", subLabel: checkSub },
+    { label: "Saving…" },
+  ];
 
-  if (currentStage > 2) s2.state = "done";
-  else if (currentStage === 2) {
-    s2.state = active ? "active" : "done";
-    if (active && llmActive) s2.subLabel = llmActive;
-  }
-
-  if (currentStage > 3) s3.state = "done";
-  else if (currentStage === 3) s3.state = active ? "active" : "done";
-
-  if (currentStage > 4) s4.state = "done";
-  else if (currentStage === 4) {
-    s4.state = active ? "active" : "done";
-    const checked = okItems + droppedItems;
-    if (realTotal > 0) {
-      s4.subLabel = `Checking ${Math.min(checked, realTotal)} of ${realTotal}`;
-    } else {
-      s4.subLabel = `Checking items…`;
-    }
-  }
-
-  if (currentStage > 5) s5.state = "done";
-  else if (currentStage === 5) s5.state = active ? "active" : "done";
-  
-  if (!active && currentStage < 5 && !hasError) {
-      // synthesize saving if it ended without explicit saving event
-      s1.state = s2.state = s3.state = s4.state = s5.state = "done";
-  }
-
-  if (hasError && active === false) {
-    if (s5.state === "active") s5.state = "error";
-    else if (s4.state === "active") s4.state = "error";
-    else if (s3.state === "active") s3.state = "error";
-    else if (s2.state === "active") s2.state = "error";
-    else if (s1.state === "active") s1.state = "error";
-  }
-
-  return [s1, s2, s3, s4, s5];
+  return { defs, target, hasError };
 }

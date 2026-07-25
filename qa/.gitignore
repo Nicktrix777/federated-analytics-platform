@@ -1,0 +1,8 @@
+node_modules/
+artifacts/
+test-results/
+playwright-report/
+__pycache__/
+.venv/
+*.pyc
+ai-eval/results/

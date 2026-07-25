@@ -85,8 +85,10 @@ const Transcript: React.FC<TranscriptProps> = ({ turns, onClarify }) => {
               <span className="chat-bubble-text">{turn.userText}</span>
             </div>
 
-            {/* Pipeline timeline (auto-collapses when the turn is done) */}
-            {turn.progress.length > 0 && (
+            {/* Staged progress — shown from the instant the turn starts
+                streaming (not only once the first SSE event lands), so the
+                query never shows just a bare spinning button. */}
+            {(turn.status === "streaming" || turn.progress.length > 0) && (
               <GenerationProgress
                 events={turn.progress}
                 active={turn.status === "streaming"}

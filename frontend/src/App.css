@@ -2245,3 +2245,117 @@ select:focus:not(:focus-visible) { outline: none; }
   }
 }
 
+
+/* ── Generation Progress (friendly staged view) ──────────────────
+   Component: src/components/GenerationProgress.tsx (query + dashboard +
+   report flows). Ships its own layout, per-stage pending/active/done/error
+   states, and a subtle enter animation so a live SSE run visibly ticks
+   through its stages instead of rendering as plain stacked text. */
+.generation-progress {
+  margin: 12px 0;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.gp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.gp-header h3 {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.gp-stages { display: flex; flex-direction: column; gap: 2px; }
+.gp-stage {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+}
+.gp-stage-icon {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  font-size: 13px;
+  line-height: 1;
+}
+.gp-stage-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gp-stage-label {
+  font-size: var(--text-base);
+  color: var(--text-muted);
+  transition: color var(--transition);
+}
+.gp-stage-sub { font-size: var(--text-xs); color: var(--text-faint); }
+
+/* pending: hollow dot */
+.gp-circle-empty {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  display: block;
+}
+/* active: highlighted row + spinner (from .spinner-sm) */
+.gp-stage-active { background: var(--accent-dim); }
+.gp-stage-active .gp-stage-label { color: var(--text-primary); font-weight: 500; }
+/* done */
+.gp-stage-done .gp-stage-label { color: var(--text-secondary); }
+.gp-stage-done .gp-stage-icon { color: var(--accent); }
+/* error */
+.gp-stage-error .gp-stage-label { color: var(--red); }
+.gp-stage-error .gp-stage-icon { color: var(--red); }
+
+.gp-footer { display: flex; gap: 8px; margin-top: 10px; }
+.gp-technical {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+@keyframes gp-stage-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+.gp-stage-active, .gp-stage-done { animation: gp-stage-in var(--transition) ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gp-stage-active, .gp-stage-done { animation: none !important; }
+}
+
+/* ── Top nav responsiveness ───────────────────────────────────────
+   The 5 nav links don't fit on a phone (~452px of links at a 390px
+   viewport) and were pushing the whole page into horizontal scroll.
+   Keep links full-size and tappable, but let the nav scroll internally
+   so the page body never overflows. */
+.top-nav {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;      /* Firefox */
+  -ms-overflow-style: none;   /* old Edge */
+}
+.top-nav::-webkit-scrollbar { display: none; }
+.top-nav-link { flex: 0 0 auto; white-space: nowrap; }
+@media (max-width: 640px) {
+  .top-nav { padding-left: 12px; padding-right: 12px; }
+}
+
+/* ── List/detail page headers on phones ──────────────────────────
+   .ds-header / .dl-header are space-between rows whose action groups
+   are flex-shrink:0; with 40px page padding they overflowed the body
+   at ~390px. On small screens, stack the header and let actions wrap. */
+@media (max-width: 640px) {
+  .ds-page, .dl-page { padding: 20px 16px; }
+  .ds-header, .dl-header { flex-direction: column; align-items: stretch; gap: 16px; }
+  .ds-header-actions, .dl-header-actions { flex-wrap: wrap; }
+}

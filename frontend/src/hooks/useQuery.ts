@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { api } from "../api/client";
 import { streamAIOperation, SSEConnectionError } from "../api/sse";
+import { safeUUID } from "../lib/uuid";
 import type {
   QueryResponse,
   Clarification,
@@ -36,7 +37,7 @@ export function useQuery() {
   // One conversation id per hook instance so follow-up questions ("now break
   // that down by region") carry prior turns as context. newConversation()
   // starts a fresh thread; loadConversation() adopts an existing one.
-  const conversationIdRef = useRef<string>(crypto.randomUUID());
+  const conversationIdRef = useRef<string>(safeUUID());
 
   const loadHistory = useCallback(async () => {
     try {
@@ -74,7 +75,7 @@ export function useQuery() {
 
   const executeQuery = useCallback(
     async (question: string, mode: QueryMode) => {
-      const turnId = crypto.randomUUID();
+      const turnId = safeUUID();
 
       // Append the new turn. If the previous turn asked an unanswered
       // clarification, this exchange answers it — mark it so and tag this
@@ -203,7 +204,7 @@ export function useQuery() {
   // Start a fresh conversation thread (drops prior-turn context) and clear the
   // transcript.
   const newConversation = useCallback(() => {
-    conversationIdRef.current = crypto.randomUUID();
+    conversationIdRef.current = safeUUID();
     setState((prev) => ({ ...prev, status: "idle", turns: [] }));
   }, []);
 
