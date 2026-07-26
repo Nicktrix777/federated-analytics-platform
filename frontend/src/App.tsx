@@ -16,6 +16,7 @@ import { api } from "./api/client";
 import type { DatasetMeta, QueryMode, ConversationSummary } from "./types";
 import { ToastProvider } from "./components/ui";
 import { Button } from "./components/ui";
+import { Icon, type IconName } from "./components/ui/Icon";
 import { ThemeProvider } from "./theme";
 
 // New pages
@@ -29,40 +30,30 @@ import LLMSettingsPage from "./pages/LLMSettingsPage";
 import "./App.css";
 
 // ── Navigation bar with active link styling ───────────────────
+const NAV_ITEMS: { to: string; label: string; icon: IconName; end?: boolean }[] = [
+  { to: "/", label: "Query", icon: "search", end: true },
+  { to: "/dashboards", label: "Dashboards", icon: "dashboard" },
+  { to: "/reports", label: "Reports", icon: "report" },
+  { to: "/datasources", label: "Data Sources", icon: "database" },
+  { to: "/settings", label: "Settings", icon: "settings" },
+];
+
 function NavBar() {
   return (
     <nav className="top-nav">
-      <NavLink
-        to="/"
-        end
-        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
-      >
-        🔎 Query
-      </NavLink>
-      <NavLink
-        to="/dashboards"
-        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
-      >
-        📊 Dashboards
-      </NavLink>
-      <NavLink
-        to="/reports"
-        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
-      >
-        📄 Reports
-      </NavLink>
-      <NavLink
-        to="/datasources"
-        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
-      >
-        🗄️ Data Sources
-      </NavLink>
-      <NavLink
-        to="/settings"
-        className={({ isActive }: { isActive: boolean }) => `top-nav-link ${isActive ? "active" : ""}`}
-      >
-        ⚙️ Settings
-      </NavLink>
+      {NAV_ITEMS.map(({ to, label, icon, end }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={end}
+          className={({ isActive }: { isActive: boolean }) =>
+            `top-nav-link ${isActive ? "active" : ""}`
+          }
+        >
+          <Icon name={icon} size={15} />
+          <span>{label}</span>
+        </NavLink>
+      ))}
     </nav>
   );
 }
@@ -158,7 +149,7 @@ function QueryPage() {
             <div className="upload-header">
               <h2>Upload Dataset</h2>
               <Button variant="ghost" onClick={() => setShowUpload(false)}>
-                ✕ Close
+                <Icon name="close" size={14} /> Close
               </Button>
             </div>
             <FileUpload onUploadSuccess={handleUploadSuccess} />
@@ -168,11 +159,15 @@ function QueryPage() {
             {hasTurns ? (
               <Transcript
                 turns={turns}
+                datasets={datasets}
                 onClarify={(option) => handleQuery(option, "ai")}
+                onFollowUp={(question) => handleQuery(question, "ai")}
               />
             ) : (
               <div className="chat-welcome">
-                <div className="chat-welcome-mark">◆</div>
+                <div className="chat-welcome-mark">
+                  <Icon name="sparkles" size={26} />
+                </div>
                 <h2>Ask your data anything</h2>
                 <p>
                   Natural-language questions across every connected source.

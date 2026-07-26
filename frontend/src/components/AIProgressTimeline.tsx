@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { AIProgressEvent, AIProgressEventData } from "../types";
+import { Icon } from "./ui/Icon";
 
 // ── AI pipeline progress timeline ─────────────────────────────
 // Renders the SSE progress events of a streaming AI operation
@@ -275,7 +276,7 @@ const AIProgressTimeline: React.FC<AIProgressTimelineProps> = ({
         style={{ cursor: "pointer" }}
       >
         <div className="card-title">
-          <span>{expanded ? "▾" : "▸"}</span>
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
           <span className="section-title">{title}</span>
           <span className="badge badge--ai">AI</span>
           {active && <span className="ai-progress-current">{lastLabel}</span>}
@@ -314,9 +315,9 @@ const AIProgressTimeline: React.FC<AIProgressTimelineProps> = ({
                     {pending ? (
                       <span className="spinner-sm" />
                     ) : it.warning ? (
-                      "⚠"
+                      <Icon name="alert" size={12} />
                     ) : (
-                      "✓"
+                      <Icon name="check" size={12} />
                     )}
                   </span>
                   <span className="ai-timeline-label">{it.label}</span>

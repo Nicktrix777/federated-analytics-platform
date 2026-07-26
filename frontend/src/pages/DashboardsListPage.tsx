@@ -5,6 +5,7 @@ import { streamAIOperation, SSEConnectionError } from "../api/sse";
 import GenerationProgress from "../components/GenerationProgress";
 import { Button, Modal, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { Icon } from "../components/ui/Icon";
 import type {
   Dashboard,
   CreateDashboardPayload,
@@ -173,7 +174,7 @@ export default function DashboardsListPage() {
         </div>
         <div className="dl-header-actions">
           <Button variant="primary" onClick={() => setShowAIModal(true)}>
-            ✨ Generate with AI
+            <Icon name="sparkles" size={14} /> Generate with AI
           </Button>
           <Button variant="ghost" onClick={() => setShowModal(true)}>
             + New Dashboard
@@ -185,7 +186,7 @@ export default function DashboardsListPage() {
         <SkeletonGrid count={4} />
       ) : dashboards.length === 0 ? (
         <EmptyState
-          icon="📊"
+          icon={<Icon name="dashboard" size={26} />}
           title="No dashboards yet"
           description="Create your first dashboard to start building custom analytics views."
           action={{ label: "Create Dashboard", onClick: () => setShowModal(true) }}
@@ -199,7 +200,9 @@ export default function DashboardsListPage() {
               style={{ animationDelay: `${index * 30}ms` }}
               onClick={() => navigate(`/dashboards/${d.id}`)}
             >
-              <div className="dl-card-icon">📊</div>
+              <div className="dl-card-icon">
+                <Icon name="dashboard" size={18} />
+              </div>
               <div className="dl-card-body">
                 <div className="dl-card-name">{d.name}</div>
                 {d.description && (
@@ -219,7 +222,7 @@ export default function DashboardsListPage() {
                     navigate(`/dashboards/${d.id}`);
                   }}
                 >
-                  Open →
+                  Open <Icon name="arrow-right" size={13} />
                 </Button>
                 <Button
                   variant="danger"
@@ -245,8 +248,8 @@ export default function DashboardsListPage() {
         boxClass="modal-lg"
       >
         <div className="modal-header">
-          <h2>✨ Generate Dashboard with AI</h2>
-          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
+          <h2><Icon name="sparkles" size={16} /> Generate Dashboard with AI</h2>
+          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
         <form onSubmit={handleGenerate} className="modal-form">
           <div className="form-group">
@@ -302,7 +305,7 @@ export default function DashboardsListPage() {
       <Modal open={showModal} onClose={() => setShowModal(false)} boxClass="">
         <div className="modal-header">
           <h2>New Dashboard</h2>
-          <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
+          <button className="modal-close" onClick={() => setShowModal(false)} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
         <form onSubmit={handleCreate} className="modal-form">
           <div className="form-group">

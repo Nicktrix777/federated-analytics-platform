@@ -5,6 +5,7 @@ import type {
   ConversationSummary,
 } from "../types";
 import SchemaPanel from "./SchemaPanel";
+import { Icon } from "./ui/Icon";
 
 interface LeftSidebarProps {
   datasets: DatasetMeta[];
@@ -73,7 +74,7 @@ const LeftSidebar: React.FC<LeftSidebarProps> = ({
         {activeTab === "chats" && (
           <div className="history-panel-inner">
             <button className="new-chat-btn" onClick={onNewChat}>
-              <span>＋</span> New chat
+              <Icon name="plus" size={13} /> New chat
             </button>
             {conversations.length === 0 ? (
               <div className="history-empty">
@@ -132,10 +133,14 @@ const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   <div className="history-meta">
                     {entry.status === "success" ? (
                       <span className="history-success">
-                        ✓ {entry.row_count.toLocaleString()} rows · {entry.duration_ms}ms
+                        <Icon name="check" size={11} />
+                        {entry.row_count.toLocaleString()} rows · {entry.duration_ms}ms
                       </span>
                     ) : (
-                      <span className="history-error">✗ Error</span>
+                      <span className="history-error">
+                        <Icon name="close" size={11} />
+                        Error
+                      </span>
                     )}
                   </div>
                 </button>

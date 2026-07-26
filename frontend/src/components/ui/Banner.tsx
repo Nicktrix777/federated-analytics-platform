@@ -1,4 +1,5 @@
 import React from "react";
+import { Icon, type IconName } from "./Icon";
 
 export type BannerKind = "error" | "success" | "info" | "warning";
 
@@ -8,11 +9,11 @@ export interface BannerProps {
   onDismiss?: () => void;
 }
 
-const ICONS: Record<BannerKind, string> = {
-  error: "⚠️",
-  success: "✓",
-  info: "ℹ",
-  warning: "⚠",
+const ICONS: Record<BannerKind, IconName> = {
+  error: "alert",
+  success: "check",
+  info: "info",
+  warning: "alert",
 };
 
 /**
@@ -23,7 +24,9 @@ const ICONS: Record<BannerKind, string> = {
 export const Banner: React.FC<BannerProps> = ({ kind, message, onDismiss }) => {
   return (
     <div className={`banner banner--${kind}`} role={kind === "error" ? "alert" : "status"}>
-      <span className="banner-icon">{ICONS[kind]}</span>
+      <span className="banner-icon">
+        <Icon name={ICONS[kind]} size={15} />
+      </span>
       <span className="banner-message">{message}</span>
       {onDismiss && (
         <button
@@ -31,7 +34,7 @@ export const Banner: React.FC<BannerProps> = ({ kind, message, onDismiss }) => {
           onClick={onDismiss}
           aria-label="Dismiss"
         >
-          ✕
+          <Icon name="close" size={14} />
         </button>
       )}
     </div>

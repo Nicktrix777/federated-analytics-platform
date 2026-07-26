@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AIProgressEvent } from "../types";
 import AIProgressTimeline from "./AIProgressTimeline";
+import { Icon } from "./ui/Icon";
 
 interface GenerationProgressProps {
   events: AIProgressEvent[];
@@ -94,8 +95,8 @@ export default function GenerationProgress({
             <div className="gp-stage-icon">
               {stage.state === "pending" && <span className="gp-circle-empty" />}
               {stage.state === "active" && <span className="spinner-sm" />}
-              {stage.state === "done" && <span>✓</span>}
-              {stage.state === "error" && <span className="error-icon">⚠</span>}
+              {stage.state === "done" && <Icon name="check" size={13} />}
+              {stage.state === "error" && <span className="error-icon"><Icon name="alert" size={13} /></span>}
             </div>
             <div className="gp-stage-text">
               <div className="gp-stage-label">{stage.label}</div>

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { llmSettingsApi } from "../api/client";
 import type { LLMSettingsConfig, LLMSettingsResponse } from "../types";
 import { Button, Banner, Skeleton } from "../components/ui";
+import { Icon } from "../components/ui/Icon";
 
 // Provider-prefixed model fields grouped by tier. The prefix (before the ":")
 // decides which provider, endpoint, and API key each call uses — switching
@@ -98,7 +99,7 @@ export default function LLMSettingsPage() {
     return (
       <div className="llm-page">
         <div className="ds-error">
-          <span>⚠️ {error ?? "No settings available."}</span>
+          <span><Icon name="alert" size={14} /> {error ?? "No settings available."}</span>
         </div>
         <button className="btn btn-secondary" onClick={load}>Retry</button>
       </div>
@@ -108,7 +109,7 @@ export default function LLMSettingsPage() {
   return (
     <div className="llm-page">
       <div className="llm-header">
-        <h1 className="llm-title">⚙️ LLM Settings</h1>
+        <h1 className="llm-title"><Icon name="settings" size={18} /> LLM Settings</h1>
         {version != null && <span className="llm-version">config v{version}</span>}
       </div>
       <p className="llm-subtitle">
@@ -131,7 +132,7 @@ export default function LLMSettingsPage() {
         <div className="llm-key-row">
           {Object.entries(keysPresent).map(([name, present]) => (
             <span key={name} className={`llm-key-pill ${present ? "present" : ""}`}>
-              {present ? "✓" : "✗"} {name}
+              <Icon name={present ? "check" : "close"} size={11} /> {name}
             </span>
           ))}
         </div>

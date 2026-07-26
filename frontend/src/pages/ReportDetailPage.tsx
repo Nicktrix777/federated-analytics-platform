@@ -17,6 +17,7 @@ import type {
 import GenerationProgress from "../components/GenerationProgress";
 import { Button, Modal, Banner, ConfirmDialog, SkeletonGrid } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { Icon } from "../components/ui/Icon";
 
 SyntaxHighlighter.registerLanguage("sql", sql);
 
@@ -321,7 +322,7 @@ export default function ReportDetailPage() {
       <div className="db-not-found">
         <h2>Report not found</h2>
         <Button variant="primary" onClick={() => navigate("/reports")}>
-          ← Back to Reports
+          <Icon name="arrow-right" size={14} className="icon-flip" /> Back to Reports
         </Button>
       </div>
     );
@@ -332,7 +333,7 @@ export default function ReportDetailPage() {
       {/* Header */}
       <div className="db-builder-header">
         <Button variant="ghost" size="sm" onClick={() => navigate("/reports")}>
-          ← Reports
+          <Icon name="arrow-right" size={14} className="icon-flip" /> Reports
         </Button>
         <div className="db-title-wrap">
           {editingName ? (
@@ -354,7 +355,7 @@ export default function ReportDetailPage() {
           ) : (
             <h1 className="db-builder-title" onClick={() => setEditingName(true)} title="Click to rename">
               {report.name}
-              <span className="edit-icon">✏️</span>
+              <span className="edit-icon"><Icon name="edit" size={14} /></span>
             </h1>
           )}
           {editingDesc ? (
@@ -380,15 +381,15 @@ export default function ReportDetailPage() {
               title="Click to edit description"
             >
               {report.description || "Add a description"}
-              <span className="edit-icon">✏️</span>
+              <span className="edit-icon"><Icon name="edit" size={14} /></span>
             </p>
           )}
         </div>
         <Button variant="primary" onClick={handleDownload} busy={downloading} busyLabel="Preparing Excel…">
-          ⬇ Download Excel
+          <Icon name="download" size={14} /> Download Excel
         </Button>
         <Button variant="secondary" onClick={() => { setRefineError(null); setShowRefineModal(true); }}>
-          ✨ Refine with AI
+          <Icon name="sparkles" size={14} /> Refine with AI
         </Button>
         <Button variant="ghost" onClick={openAddSheet}>
           + Add Sheet
@@ -403,7 +404,7 @@ export default function ReportDetailPage() {
         <div className={`ai-summary-banner${aiDropped.length > 0 ? " ai-summary-banner-warning" : ""}`}>
           <div className="ai-summary-content">
             {aiSummary && (
-              <span>{aiDropped.length > 0 ? "⚠️" : "✨"} {aiSummary}</span>
+              <span className="ai-summary-line"><Icon name={aiDropped.length > 0 ? "alert" : "sparkles"} size={14} />{aiSummary}</span>
             )}
             {aiDropped.length > 0 && (
               <div className="ai-dropped-list">
@@ -429,7 +430,7 @@ export default function ReportDetailPage() {
               setAiDropped([]);
             }}
           >
-            ✕
+            <Icon name="close" size={14} />
           </Button>
         </div>
       )}
@@ -437,7 +438,7 @@ export default function ReportDetailPage() {
       {/* Sheet list */}
       {sheets.length === 0 ? (
         <div className="db-empty-canvas">
-          <div className="db-empty-icon">📑</div>
+          <div className="db-empty-icon"><Icon name="report" size={28} /></div>
           <h3>Report is empty</h3>
           <p>Add your first sheet to define what goes into the workbook.</p>
           <Button variant="primary" onClick={openAddSheet}>
@@ -468,7 +469,7 @@ export default function ReportDetailPage() {
                   <p className="rd-sheet-desc">{sheet.description}</p>
                 )}
                 <button className="ds-schema-toggle" onClick={() => toggleSql(sheet.id)}>
-                  <span>{expandedSql.has(sheet.id) ? "▾" : "▸"}</span>
+                  <Icon name={expandedSql.has(sheet.id) ? "chevron-down" : "chevron-right"} size={12} />
                   <span>{expandedSql.has(sheet.id) ? "Hide SQL" : "Show SQL"}</span>
                 </button>
                 {expandedSql.has(sheet.id) && (
@@ -502,8 +503,8 @@ export default function ReportDetailPage() {
         boxClass="modal-lg"
       >
         <div className="modal-header">
-          <h2>✨ Refine Report with AI</h2>
-          <button className="modal-close" onClick={() => setShowRefineModal(false)} disabled={refining}>✕</button>
+          <h2><Icon name="sparkles" size={16} /> Refine Report with AI</h2>
+          <button className="modal-close" onClick={() => setShowRefineModal(false)} disabled={refining} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
         <form onSubmit={handleRefine} className="modal-form">
           <div className="form-group">
@@ -559,7 +560,7 @@ export default function ReportDetailPage() {
       >
         <div className="modal-header">
           <h2>{editingSheet ? "Edit Sheet" : "Add Sheet"}</h2>
-          <button className="modal-close" onClick={() => setShowSheetModal(false)}>✕</button>
+          <button className="modal-close" onClick={() => setShowSheetModal(false)} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
 
         <form onSubmit={handleSaveSheet} className="modal-form">

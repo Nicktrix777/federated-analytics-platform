@@ -1,6 +1,7 @@
 import React from "react";
 import type { DatasetMeta } from "../types";
 import { useTheme } from "../theme";
+import { Icon, sourceIcon } from "./ui/Icon";
 
 interface HeaderProps {
   aiEnabled?: boolean;
@@ -39,7 +40,8 @@ const Header: React.FC<HeaderProps> = ({
                 className={`source-badge source-badge--${ds.source_type}`}
               >
                 <span className="source-badge-dot" />
-                {ds.source_type === "postgresql" ? "🐘" : "🍃"} {ds.name}
+                <Icon name={sourceIcon(ds.source_type)} size={12} />
+                {ds.name}
               </span>
             ))}
           </div>
@@ -53,7 +55,7 @@ const Header: React.FC<HeaderProps> = ({
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
         >
-          {theme === "dark" ? "☀" : "☾"}
+          <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
         </button>
 
         {onToggleUpload && (
@@ -63,7 +65,7 @@ const Header: React.FC<HeaderProps> = ({
             onClick={onToggleUpload}
             title="Upload a CSV or Excel file"
           >
-            ↑ Upload
+            <Icon name="upload" size={14} /> Upload
           </button>
         )}
 
@@ -74,7 +76,7 @@ const Header: React.FC<HeaderProps> = ({
             onClick={onNewQuery}
             title="Clear results and start a new query"
           >
-            + New Query
+            <Icon name="plus" size={14} /> New Query
           </button>
         )}
 

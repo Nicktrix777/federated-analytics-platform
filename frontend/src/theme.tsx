@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 
 export type Theme = "dark" | "light";
 
@@ -26,11 +26,20 @@ export function resolveInitialTheme(): Theme {
   return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
+function applyThemeAttribute(t: Theme) {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-theme", t);
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(resolveInitialTheme);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
+    // Safety re-apply (covers the first mount, where index.html's inline
+    // script already set the attribute) plus persistence.
+    applyThemeAttribute(theme);
     try {
       localStorage.setItem(STORAGE_KEY, theme);
     } catch {
@@ -38,10 +47,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [theme]);
 
-  const setTheme = useCallback((t: Theme) => setThemeState(t), []);
+  // The DOM attribute is set BEFORE the state update, not in an effect after
+  // it. Charts read their palette from CSS custom properties during render;
+  // if the attribute only landed in a post-render effect they would build
+  // their options from the outgoing theme's colours and never re-render —
+  // black bars on a black canvas after a toggle to dark.
+  const setTheme = useCallback((t: Theme) => {
+    applyThemeAttribute(t);
+    setThemeState(t);
+  }, []);
+
   const toggle = useCallback(
-    () => setThemeState((t) => (t === "dark" ? "light" : "dark")),
-    []
+    () => setTheme(themeRef.current === "dark" ? "light" : "dark"),
+    [setTheme]
   );
 
   return (

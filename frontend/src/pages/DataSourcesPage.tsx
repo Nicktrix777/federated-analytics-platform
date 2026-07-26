@@ -3,14 +3,12 @@ import { dataSourcesApi } from "../api/client";
 import type { DataSource, CreateDataSourcePayload } from "../types";
 import { Button, Modal, Banner, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { Icon, sourceIcon } from "../components/ui/Icon";
 
-const SOURCE_TYPE_ICONS: Record<string, string> = {
-  postgresql: "🐘",
-  mongodb: "🍃",
-  elasticsearch: "🔍",
-  mysql: "🐬",
-  trino: "⚡",
-};
+// Connectable source types, in the order they appear in the picker. Icons come
+// from the shared registry so this page and the schema panel can never
+// disagree about what a MongoDB source looks like.
+const SOURCE_TYPES = ["postgresql", "mongodb", "elasticsearch", "mysql", "trino"] as const;
 
 const DEFAULT_PORTS: Record<string, number> = {
   postgresql: 5432,
@@ -183,7 +181,7 @@ export default function DataSourcesPage() {
             busyLabel="Syncing…"
             title="Discover new Trino catalogs and tables/indices (e.g. a newly added Elasticsearch index) without a manual setup step"
           >
-            ⟲ Sync Catalogs
+            <Icon name="sync" size={14} /> Sync Catalogs
           </Button>
           <Button variant="primary" onClick={() => setShowModal(true)}>
             <span>+</span> Connect Source
@@ -199,7 +197,7 @@ export default function DataSourcesPage() {
         <SkeletonGrid count={3} />
       ) : sources.length === 0 ? (
         <EmptyState
-          icon="🗄️"
+          icon={<Icon name="database" size={26} />}
           title="No data sources registered"
           description="Connect your first database, Elasticsearch cluster, or MongoDB instance to start building federated queries."
           action={{ label: "Connect Your First Source", onClick: () => setShowModal(true) }}
@@ -221,7 +219,7 @@ export default function DataSourcesPage() {
               >
                 <div className="ds-card-header">
                   <div className="ds-card-icon">
-                    {SOURCE_TYPE_ICONS[src.source_type] ?? "🗄️"}
+                    <Icon name={sourceIcon(src.source_type)} size={20} />
                   </div>
                   <div className="ds-card-info">
                     <div className="ds-card-name">{src.name}</div>
@@ -280,7 +278,8 @@ export default function DataSourcesPage() {
                         setExpandedSchemaId(isExpanded ? null : src.id)
                       }
                     >
-                      {isExpanded ? "▼" : "▶"} Schema Preview
+                      <Icon name={isExpanded ? "chevron-down" : "chevron-right"} size={12} />
+                      Schema Preview
                     </button>
                     {isExpanded && (
                       <div className="ds-schema-list">
@@ -317,7 +316,7 @@ export default function DataSourcesPage() {
                     busyLabel="Refreshing…"
                     title="Fetch live schema from this source via Trino"
                   >
-                    ⟳ Refresh Schema
+                    <Icon name="refresh" size={13} /> Refresh Schema
                   </Button>
                   <Button
                     variant="danger"
@@ -341,8 +340,9 @@ export default function DataSourcesPage() {
           <button
             className="modal-close"
             onClick={() => setShowModal(false)}
+            aria-label="Close"
           >
-            ✕
+            <Icon name="close" size={16} />
           </button>
         </div>
 
@@ -350,7 +350,7 @@ export default function DataSourcesPage() {
           <div className="form-group">
             <label>Source Type</label>
             <div className="source-type-grid">
-              {Object.keys(SOURCE_TYPE_ICONS).map((type) => (
+              {SOURCE_TYPES.map((type) => (
                 <button
                   key={type}
                   type="button"
@@ -358,7 +358,7 @@ export default function DataSourcesPage() {
                   onClick={() => handleTypeChange(type)}
                 >
                   <span className="source-type-icon">
-                    {SOURCE_TYPE_ICONS[type]}
+                    <Icon name={sourceIcon(type)} size={20} />
                   </span>
                   <span className="source-type-label">{type}</span>
                 </button>

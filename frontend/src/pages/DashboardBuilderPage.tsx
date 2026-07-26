@@ -15,23 +15,26 @@ import type {
   AIProgressEventData,
   DroppedWidget,
 } from "../types";
-import DashboardWidgetCard from "../components/DashboardWidgetCard";
+import DashboardWidgetCard, { type WidgetResult } from "../components/DashboardWidgetCard";
+import DashboardInsights from "../components/DashboardInsights";
 import GenerationProgress from "../components/GenerationProgress";
 import { Button, Modal, ConfirmDialog, SkeletonGrid } from "../components/ui";
+import { Icon, type IconName } from "../components/ui/Icon";
 import { useToast } from "../components/ui/Toast";
+import type { WidgetData } from "../lib/insights";
 
 // WidthProvider measures the container so tiles fill the viewport (no dead
 // space on the right); Responsive gives us breakpoint-aware columns.
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
-const CHART_TYPES: { type: ChartType; label: string; icon: string }[] = [
-  { type: "table", label: "Table", icon: "📋" },
-  { type: "bar", label: "Bar Chart", icon: "📊" },
-  { type: "line", label: "Line Chart", icon: "📈" },
-  { type: "pie", label: "Pie Chart", icon: "🥧" },
-  { type: "area", label: "Area Chart", icon: "⛰️" },
-  { type: "number", label: "Big Number", icon: "🔢" },
-  { type: "gauge", label: "Gauge", icon: "⏱️" },
+const CHART_TYPES: { type: ChartType; label: string; icon: IconName }[] = [
+  { type: "table", label: "Table", icon: "table" },
+  { type: "bar", label: "Bar Chart", icon: "chart-bar" },
+  { type: "line", label: "Line Chart", icon: "chart-line" },
+  { type: "pie", label: "Pie Chart", icon: "chart-pie" },
+  { type: "area", label: "Area Chart", icon: "chart-area" },
+  { type: "number", label: "Big Number", icon: "chart-number" },
+  { type: "gauge", label: "Gauge", icon: "chart-gauge" },
 ];
 
 interface WidgetFormState {
@@ -75,6 +78,10 @@ export default function DashboardBuilderPage() {
   const [refineInstruction, setRefineInstruction] = useState("");
   const [refining, setRefining] = useState(false);
   const [confirmDeleteWidget, setConfirmDeleteWidget] = useState<number | null>(null);
+  // Live widget results, keyed by widget id. Each tile publishes its rows as
+  // it loads so the insight strip can read the whole dashboard without
+  // re-running a single query.
+  const [widgetResults, setWidgetResults] = useState<Record<number, WidgetResult | null>>({});
   const [refineError, setRefineError] = useState<string | null>(null);
   const [refineProgress, setRefineProgress] = useState<AIProgressEvent[]>([]);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
@@ -154,6 +161,35 @@ export default function DashboardBuilderPage() {
   // Stable per-breakpoint layouts object for the controlled Responsive grid.
   // Memoized so a same-content render doesn't hand RGL a new reference.
   const gridLayouts = useMemo<Layouts>(() => ({ lg: layout }), [layout]);
+
+  // Identity-stable so it never retriggers a tile's query effect.
+  const handleWidgetResult = useCallback((widgetId: number, result: WidgetResult | null) => {
+    setWidgetResults((prev) => {
+      if (prev[widgetId] === result) return prev;
+      return { ...prev, [widgetId]: result };
+    });
+  }, []);
+
+  // Feed the insight strip: only widgets that actually returned rows, paired
+  // with their title so each finding can name its source.
+  const insightInputs = useMemo<WidgetData[]>(
+    () =>
+      widgets
+        .map((w): WidgetData | null => {
+          const r = widgetResults[w.id];
+          if (!r || r.rows.length === 0) return null;
+          return {
+            title: w.title,
+            chartType: w.chart_type,
+            columns: r.columns,
+            rows: r.rows,
+          };
+        })
+        .filter((x): x is WidgetData => x !== null),
+    [widgets, widgetResults]
+  );
+
+  const pendingWidgets = widgets.filter((w) => widgetResults[w.id] === undefined).length;
 
   // Place a new manual widget below everything else instead of the old
   // fixed {x:0, y:len*4} — kills the left-column pile-up and never overlaps.
@@ -378,7 +414,7 @@ export default function DashboardBuilderPage() {
       <div className="db-not-found">
         <h2>Dashboard not found</h2>
         <Button variant="primary" onClick={() => navigate("/dashboards")}>
-          ← Back to Dashboards
+          <Icon name="arrow-right" size={14} className="icon-flip" /> Back to Dashboards
         </Button>
       </div>
     );
@@ -389,7 +425,7 @@ export default function DashboardBuilderPage() {
       {/* Header */}
       <div className="db-builder-header">
         <Button variant="ghost" size="sm" onClick={() => navigate("/dashboards")}>
-          ← Dashboards
+          <Icon name="arrow-right" size={14} className="icon-flip" /> Dashboards
         </Button>
         <div className="db-title-wrap">
           {editingName ? (
@@ -411,7 +447,9 @@ export default function DashboardBuilderPage() {
           ) : (
             <h1 className="db-builder-title" onClick={() => setEditingName(true)} title="Click to rename">
               {dashboard.name}
-              <span className="edit-icon">✏️</span>
+              <span className="edit-icon">
+                <Icon name="edit" size={14} />
+              </span>
             </h1>
           )}
           {dashboard.description && (
@@ -419,10 +457,10 @@ export default function DashboardBuilderPage() {
           )}
         </div>
         <Button variant="secondary" onClick={() => { setRefineError(null); setShowRefineModal(true); }}>
-          ✨ Refine with AI
+          <Icon name="sparkles" size={14} /> Refine with AI
         </Button>
         <Button variant="ghost" onClick={openAddWidget}>
-          + Add Widget
+          <Icon name="plus" size={14} /> Add Widget
         </Button>
       </div>
 
@@ -430,7 +468,10 @@ export default function DashboardBuilderPage() {
         <div className={`ai-summary-banner${aiDropped.length > 0 ? " ai-summary-banner-warning" : ""}`}>
           <div className="ai-summary-content">
             {aiSummary && (
-              <span>{aiDropped.length > 0 ? "⚠️" : "✨"} {aiSummary}</span>
+              <span className="ai-summary-line">
+                <Icon name={aiDropped.length > 0 ? "alert" : "sparkles"} size={14} />
+                {aiSummary}
+              </span>
             )}
             {aiDropped.length > 0 && (
               <div className="ai-dropped-list">
@@ -456,15 +497,22 @@ export default function DashboardBuilderPage() {
               setAiDropped([]);
             }}
           >
-            ✕
+            <Icon name="close" size={14} />
           </Button>
         </div>
+      )}
+
+      {/* Auto-derived reading of the tiles below. Fills in as widgets load. */}
+      {widgets.length > 0 && (
+        <DashboardInsights widgetData={insightInputs} pending={pendingWidgets} />
       )}
 
       {/* Canvas */}
       {widgets.length === 0 ? (
         <div className="db-empty-canvas">
-          <div className="db-empty-icon">📊</div>
+          <div className="db-empty-icon">
+            <Icon name="dashboard" size={28} />
+          </div>
           <h3>Dashboard is empty</h3>
           <p>Add your first widget to start building your analytics view.</p>
           <Button variant="primary" onClick={openAddWidget}>
@@ -501,6 +549,7 @@ export default function DashboardBuilderPage() {
                   widget={widget}
                   onEdit={() => openEditWidget(widget)}
                   onDelete={() => handleDeleteWidget(widget.id)}
+                  onResult={handleWidgetResult}
                 />
               </div>
             ))}
@@ -516,8 +565,17 @@ export default function DashboardBuilderPage() {
         boxClass="modal-lg"
       >
         <div className="modal-header">
-          <h2>✨ Refine Dashboard with AI</h2>
-          <button className="modal-close" onClick={() => setShowRefineModal(false)} disabled={refining}>✕</button>
+          <h2>
+            <Icon name="sparkles" size={16} /> Refine Dashboard with AI
+          </h2>
+          <button
+            className="modal-close"
+            onClick={() => setShowRefineModal(false)}
+            disabled={refining}
+            aria-label="Close"
+          >
+            <Icon name="close" size={16} />
+          </button>
         </div>
         <form onSubmit={handleRefine} className="modal-form">
           <div className="form-group">
@@ -574,7 +632,13 @@ export default function DashboardBuilderPage() {
       >
             <div className="modal-header">
               <h2>{editingWidget ? "Edit Widget" : "Add Widget"}</h2>
-              <button className="modal-close" onClick={() => setShowWidgetModal(false)}>✕</button>
+              <button
+                className="modal-close"
+                onClick={() => setShowWidgetModal(false)}
+                aria-label="Close"
+              >
+                <Icon name="close" size={16} />
+              </button>
             </div>
 
             <form onSubmit={handleSaveWidget} className="modal-form">
@@ -612,7 +676,7 @@ export default function DashboardBuilderPage() {
                       className={`chart-type-btn ${widgetForm.chart_type === type ? "selected" : ""}`}
                       onClick={() => setWidgetForm((f) => ({ ...f, chart_type: type }))}
                     >
-                      <span>{icon}</span>
+                      <Icon name={icon} size={18} />
                       <span>{label}</span>
                     </button>
                   ))}

@@ -6,6 +6,7 @@ import React, {
   useRef,
   useEffect,
 } from "react";
+import { Icon, type IconName } from "./Icon";
 import { createPortal } from "react-dom";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -113,10 +114,10 @@ export function useToast(): ToastContextValue {
 
 // ── Toast bubble ──────────────────────────────────────────────────────────────
 
-const ICONS: Record<ToastKind, string> = {
-  success: "✓",
-  error: "✕",
-  info: "ℹ",
+const ICONS: Record<ToastKind, IconName> = {
+  success: "check",
+  error: "alert",
+  info: "info",
 };
 
 const ToastBubble: React.FC<{
@@ -128,14 +129,16 @@ const ToastBubble: React.FC<{
       className={`toast toast--${toast.kind}${toast.exiting ? " toast--exit" : ""}`}
       role="alert"
     >
-      <span className="toast-icon">{ICONS[toast.kind]}</span>
+      <span className="toast-icon">
+        <Icon name={ICONS[toast.kind]} size={14} />
+      </span>
       <span className="toast-message">{toast.message}</span>
       <button
         className="toast-close"
         onClick={() => onDismiss(toast.id)}
         aria-label="Dismiss notification"
       >
-        ✕
+        <Icon name="close" size={13} />
       </button>
     </div>
   );

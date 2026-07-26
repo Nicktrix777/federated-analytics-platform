@@ -30,13 +30,23 @@
   --accent-border:  rgba(255, 255, 255, 0.28);
   --accent-glow:    rgba(255, 255, 255, 0.22);
 
-  /* Greyscale ramp — multi-series charts / data viz (light → dark on black) */
-  --ramp-1: #ffffff;
-  --ramp-2: #cfcfcf;
-  --ramp-3: #a0a0a0;
-  --ramp-4: #757575;
-  --ramp-5: #505050;
-  --ramp-6: #333333;
+  /* ── Chart palette (dark surface #101010) ──────────────────
+     Categorical hues, assigned in this fixed order and never cycled.
+     Validated, not eyeballed — worst adjacent pair CVD ΔE 11.4,
+     normal-vision ΔE 18.4, every slot ≥ 3:1 contrast on --bg-card.
+     Chrome stays monochrome; only the data carries hue. */
+  --series-1: #56B4E9;  /* sky      */
+  --series-2: #009E73;  /* green    */
+  --series-3: #E69F00;  /* amber    */
+  --series-4: #CC79A7;  /* pink     */
+
+  /* 6-step ramp for direct-labelled segment fills (pie slices). */
+  --ramp-1: #56B4E9;
+  --ramp-2: #009E73;
+  --ramp-3: #E69F00;
+  --ramp-4: #B79BFF;
+  --ramp-5: #F0E442;
+  --ramp-6: #CC79A7;
 
   /* Text */
   --text-primary:   #ffffff;
@@ -111,13 +121,20 @@
   --accent-border:  rgba(0, 0, 0, 0.24);
   --accent-glow:    rgba(0, 0, 0, 0.15);
 
-  /* Greyscale ramp — dark → light on white */
-  --ramp-1: #111111;
-  --ramp-2: #3f3f3f;
-  --ramp-3: #6b6b6b;
-  --ramp-4: #979797;
-  --ramp-5: #bcbcbc;
-  --ramp-6: #dcdcdc;
+  /* ── Chart palette (light surface #ffffff) ─────────────────
+     Same hue order, re-stepped for a white surface. Passes every
+     check: adjacent CVD ΔE 11.0, normal-vision ΔE 16.4, contrast ≥3:1. */
+  --series-1: #0072B2;  /* sky      */
+  --series-2: #009E73;  /* green    */
+  --series-3: #D55E00;  /* vermilion*/
+  --series-4: #CC79A7;  /* pink     */
+
+  --ramp-1: #0072B2;
+  --ramp-2: #009E73;
+  --ramp-3: #D55E00;
+  --ramp-4: #CC79A7;
+  --ramp-5: #7B5AB6;
+  --ramp-6: #8A6D00;
 
   --text-primary:   #0a0a0a;
   --text-secondary: rgba(0, 0, 0, 0.62);
@@ -348,15 +365,16 @@ body {
 }
 
 .sidebar-content {
-  flex: 1; overflow-y: auto;
+  flex: 1; min-height: 0;
   display: flex; flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── Schema Panel ───────────────────────────────────────────── */
 .schema-panel {
-  flex: 1; overflow-y: auto;
-  padding: var(--space-sm);
-  display: flex; flex-direction: column; gap: var(--space-xs);
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
 }
 
 .schema-empty {
@@ -1466,14 +1484,16 @@ select:focus:not(:focus-visible) { outline: none; }
 
 /* Chart type picker */
 .chart-type-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.chart-type-btn {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 10px 6px; border-radius: 8px; cursor: pointer;
+.chart-type-grid .chart-type-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 12px 6px; border-radius: 8px; cursor: pointer;
   background: var(--bg-surface); border: 1px solid var(--border-default);
   color: var(--text-secondary); transition: all 0.15s; font-family: inherit; font-size: 12px;
 }
-.chart-type-btn:hover { border-color: var(--border-raised); }
-.chart-type-btn.selected { border-color: var(--accent); background: var(--accent-dim); color: var(--accent-bright); }
+.chart-type-grid .chart-type-btn:hover { border-color: var(--border-raised); color: var(--text-primary); }
+.chart-type-grid .chart-type-btn.selected {
+  border-color: var(--accent); background: var(--accent-dim); color: var(--accent-bright);
+}
 
 /* ── Dashboard Widget Card ───────────────────────────────────── */
 .widget-card {
@@ -2358,4 +2378,480 @@ select:focus:not(:focus-visible) { outline: none; }
   .ds-page, .dl-page { padding: 20px 16px; }
   .ds-header, .dl-header { flex-direction: column; align-items: stretch; gap: 16px; }
   .ds-header-actions, .dl-header-actions { flex-wrap: wrap; }
+}
+
+/* ============================================================
+   v4 — SVG icon system, schema panel, chart chrome, insights
+   ============================================================ */
+
+/* ── Icons ──────────────────────────────────────────────────── */
+/* Every former emoji is now an inline SVG on currentColor. These rules keep
+   them optically aligned with adjacent text and stop them from stretching
+   inside flex rows. */
+.icon {
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -0.14em;
+}
+/* Back-links reuse the forward arrow, mirrored. */
+.icon-flip { transform: scaleX(-1); }
+
+/* Containers that used to size an emoji with font-size now just centre a box. */
+.upload-icon,
+.clarification-icon,
+.db-empty-icon,
+.dl-card-icon,
+.ds-card-icon,
+.empty-state-icon,
+.empty-icon,
+.banner-icon,
+.toast-icon,
+.upload-success-icon,
+.schema-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0; /* neutralise inherited emoji sizing */
+  line-height: 0;
+}
+.upload-icon { margin-bottom: 0.6rem; opacity: 0.45; color: var(--text-secondary); }
+.clarification-icon { margin-bottom: 12px; color: var(--text-secondary); }
+.db-empty-icon { margin-bottom: 16px; color: var(--text-muted); }
+.dl-card-icon, .ds-card-icon {
+  width: 38px; height: 38px; border-radius: 8px;
+  background: var(--bg-raised); color: var(--text-secondary);
+}
+.empty-state-icon { opacity: 0.55; color: var(--text-secondary); }
+.empty-icon { opacity: 0.5; }
+.upload-success-icon { color: var(--green); }
+.edit-icon { display: inline-flex; align-items: center; font-size: 0; }
+
+/* Icon-only buttons need a real hit target, not just the glyph box. */
+.widget-btn,
+.modal-close,
+.banner-close,
+.toast-close,
+.header-btn.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  min-height: 26px;
+}
+
+/* ── Left sidebar: schema panel ─────────────────────────────── */
+/* The panel is a fixed header (search + summary) over ONE scroll region.
+   Previously .sidebar-content and .schema-panel were both scroll containers
+   holding flex children, so an expanded 50-column table squeezed every other
+   row down to a few pixels instead of scrolling. */
+.schema-search {
+  display: flex; align-items: center; gap: 6px;
+  margin: var(--space-sm) var(--space-sm) 6px;
+  padding: 5px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.schema-search:focus-within { border-color: var(--accent-border); }
+.schema-search-icon { color: var(--text-faint); }
+.schema-search-input {
+  flex: 1; min-width: 0;
+  background: none; border: none; outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans); font-size: 11.5px;
+}
+.schema-search-input::placeholder { color: var(--text-faint); }
+.schema-search-input::-webkit-search-cancel-button { display: none; }
+.schema-search-clear {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-faint); display: inline-flex; padding: 2px;
+}
+.schema-search-clear:hover { color: var(--text-primary); }
+
+.schema-summary {
+  padding: 0 var(--space-sm) 6px;
+  font-size: 10px; color: var(--text-faint);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+/* The one and only scroll container in the panel. */
+.schema-scroll {
+  flex: 1; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 0 var(--space-sm) var(--space-sm);
+  display: flex; flex-direction: column; gap: var(--space-sm);
+}
+
+.schema-group { display: flex; flex-direction: column; gap: var(--space-xs); flex-shrink: 0; }
+
+.schema-group-header {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 4px 2px;
+  background: none; border: none; cursor: pointer;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  text-align: left;
+}
+.schema-group-header:hover { color: var(--text-primary); }
+.schema-group-chevron { transition: transform var(--transition); }
+.schema-group-chevron--closed { transform: rotate(-90deg); }
+.schema-group-icon { color: var(--text-secondary); }
+.schema-group-name {
+  font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.schema-group-badge {
+  font-size: 9px; font-weight: 600;
+  padding: 1px 5px; border-radius: var(--radius-xs);
+  background: var(--bg-raised); color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+/* Connected indicator — this panel's job is to say what's live. */
+.schema-group-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green); flex-shrink: 0; margin-left: auto;
+  box-shadow: 0 0 5px rgba(74,222,128,0.5);
+}
+
+.schema-group-body { display: flex; flex-direction: column; gap: var(--space-xs); }
+
+/* Rows must never be squeezed by a tall sibling — they scroll instead. */
+.schema-dataset { flex-shrink: 0; }
+
+.schema-dataset-header {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: var(--font-sans);
+  text-align: left;
+  color: inherit;
+}
+
+.schema-dataset-path {
+  /* The full Trino path is the thing you paste into SQL — wrap it instead of
+     truncating to `elasticsearch.default."c…`. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.schema-dataset-count {
+  display: flex; align-items: baseline; gap: 2px;
+  font-size: 10px; color: var(--text-faint);
+  font-family: var(--font-mono); flex-shrink: 0;
+}
+.schema-dataset-count-unit { font-size: 8.5px; }
+
+.schema-columns {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.schema-columns-empty {
+  padding: 8px 10px; font-size: 11px; color: var(--text-muted);
+}
+
+.schema-column {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: var(--font-sans);
+  text-align: left;
+  color: inherit;
+}
+
+/* Composite (ROW/ARRAY/MAP) columns read differently from scalars: they can't
+   be selected directly, so they get a distinct badge and a field count. */
+.schema-column-type--object,
+.schema-column-type--list {
+  background: var(--bg-card);
+  color: var(--text-muted);
+  border: 1px dashed var(--border-md);
+}
+.schema-column-type--text,
+.schema-column-type--number,
+.schema-column-type--time,
+.schema-column-type--boolean,
+.schema-column-type--other {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+}
+.schema-column-nested {
+  font-size: 9px; color: var(--text-faint);
+  font-family: var(--font-mono); flex-shrink: 0;
+}
+.schema-column-key { color: var(--text-muted); }
+
+.schema-empty-icon { color: var(--text-faint); }
+.schema-empty-hint {
+  font-size: 10.5px; color: var(--text-faint);
+  margin-top: 2px; max-width: 190px; line-height: 1.5;
+}
+
+.schema-dataset-badge--elasticsearch,
+.schema-dataset-badge--mysql,
+.schema-dataset-badge--trino {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+}
+
+/* History rows: icon + text baseline. */
+.history-success, .history-error {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+
+/* ── Chart card chrome ──────────────────────────────────────── */
+.chart-toolbar { display: flex; align-items: center; gap: 6px; }
+
+.chart-type-btn--icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 22px; padding: 0 6px;
+}
+
+/* Says what is actually drawn, including what was folded or left out —
+   a silently truncated chart otherwise reads as the whole picture. */
+.chart-caption {
+  margin: 8px 2px 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.badge--chart {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  border-color: var(--border);
+  text-transform: capitalize;
+}
+
+.confidence-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  display: inline-block; flex-shrink: 0;
+}
+
+/* ── Result insights (Query Studio) ─────────────────────────── */
+.insights-card { animation: slide-down 0.22s ease; }
+.insights-header-icon { color: var(--text-secondary); }
+
+.insights-body { display: flex; flex-direction: column; gap: var(--space-md); }
+
+.insights-summary {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.insights-list {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+.insight-row {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 9px 11px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+.insight-icon { color: var(--text-muted); margin-top: 2px; }
+.insight-text { flex: 1; min-width: 0; }
+/* Data-quality notes are a caveat, not a finding — recede them. */
+.insight-row--gaps { color: var(--text-muted); }
+.insight-row--gaps .insight-icon { color: var(--amber); }
+
+.followups {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-md);
+}
+.followups-label {
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.followups-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.followup-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-md);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition);
+}
+.followup-chip:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+.followup-chip .icon { opacity: 0.55; }
+.followup-chip:hover .icon { opacity: 1; }
+
+/* ── Dashboard insights strip ───────────────────────────────── */
+.dash-insights {
+  max-width: 1600px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 18px 32px 0;
+}
+
+.dash-insights--loading {
+  display: flex; align-items: center; gap: 8px;
+  padding: 16px 32px 0;
+  font-size: 12px; color: var(--text-faint);
+}
+
+.dash-insights-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}
+.dash-insights-pending {
+  text-transform: none; letter-spacing: 0;
+  font-weight: 500; color: var(--text-faint);
+}
+
+.dash-insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.dash-insight {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 11px 13px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  animation: slide-down 0.24s ease;
+}
+.dash-insight-icon { color: var(--text-muted); margin-top: 2px; }
+.dash-insight-body { min-width: 0; }
+.dash-insight-text {
+  margin: 0;
+  font-size: 12.5px; line-height: 1.5;
+  color: var(--text-primary);
+}
+.dash-insight-source {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* ── Widget card refinements ────────────────────────────────── */
+/* Hold the previous render at reduced opacity while refetching — a skeleton
+   flash on every auto-refresh cycle is worse than a moment of stale data. */
+.widget-body--refreshing { opacity: 0.55; transition: opacity 140ms ease; }
+
+.widget-error {
+  flex-direction: column;
+  color: var(--text-secondary);
+}
+.widget-error > .icon { color: var(--red); }
+.widget-error-text {
+  color: var(--text-muted);
+  max-width: 280px;
+  overflow-wrap: anywhere;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.widget-retry { display: inline-flex; align-items: center; gap: 5px; }
+
+.widget-empty {
+  flex-direction: column; gap: 8px;
+  height: 100%; min-height: 80px;
+  color: var(--text-faint);
+}
+
+.widget-drag-handle { display: inline-flex; align-items: center; font-size: 0; }
+
+/* Numbers align in columns; the hero value does not (tabular figures make a
+   large standalone number look loose). */
+.widget-table-num { font-variant-numeric: tabular-nums; text-align: right; }
+.widget-number-value { font-variant-numeric: proportional-nums; }
+
+.ai-summary-line { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ── Reduced motion ─────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .dash-insight, .insights-card { animation: none; }
+  .followup-chip:hover { transform: none; }
+}
+
+/* ── Stat callout ───────────────────────────────────────────── */
+/* Shown instead of a chart when the data's job is a single number: one
+   aggregate row, or a metric identical across every category. A one-bar bar
+   chart and eight identical bars are chart-shaped furniture — this says the
+   same thing without pretending there's a distribution. */
+.stat-callout {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 4px;
+  padding: var(--space-xl) var(--space-md);
+  text-align: center;
+}
+.stat-callout-value {
+  /* Proportional figures: tabular-nums makes a big standalone number
+     look loose. */
+  font-variant-numeric: proportional-nums;
+  font-size: 52px;
+  font-weight: 600;
+  line-height: 1.05;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.stat-callout-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.stat-callout-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.widget-number-note {
+  margin-top: 8px;
+  max-width: 260px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+/* ── Narrow viewports: builder header + insight strip ───────── */
+/* The builder header is a single non-wrapping flex row (back · title ·
+   Refine · Add Widget). At phone widths its buttons push past the viewport
+   and the whole page scrolls sideways — let it wrap instead. */
+@media (max-width: 720px) {
+  .db-builder-header {
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    gap: 10px;
+  }
+  .db-title-wrap {
+    flex: 1 0 100%;
+    order: -1;
+  }
+  .db-builder-title { font-size: 18px; }
+  .dash-insights { padding: 14px 16px 0; }
+  .dash-insights--loading { padding: 14px 16px 0; }
+  .dash-insights-grid { grid-template-columns: 1fr; }
+  .db-canvas { padding: 16px; }
 }

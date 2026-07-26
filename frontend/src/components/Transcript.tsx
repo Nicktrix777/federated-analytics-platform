@@ -1,9 +1,11 @@
 import React, { useEffect, useRef } from "react";
-import type { TranscriptTurn, Clarification } from "../types";
+import type { TranscriptTurn, Clarification, DatasetMeta } from "../types";
 import QueryPlanView from "./QueryPlan";
 import ResultsTable from "./ResultsTable";
 import ResultsChart from "./ResultsChart";
+import ResultInsights from "./ResultInsights";
 import GenerationProgress from "./GenerationProgress";
+import { Icon } from "./ui/Icon";
 
 // ── Clarification card (PR7) ──────────────────────────────────
 // The AI asked a question instead of guessing. Option buttons answer on the
@@ -21,7 +23,9 @@ const ClarificationMessage: React.FC<ClarificationMessageProps> = ({
   onSelect,
 }) => (
   <div className={`clarification-card ${answered ? "clarification-card--answered" : ""}`}>
-    <div className="clarification-icon">💬</div>
+    <div className="clarification-icon">
+      <Icon name="message" size={16} />
+    </div>
     <h3 className="clarification-question">{clarification.question}</h3>
     {clarification.options.length > 0 && (
       <div className="clarification-options">
@@ -49,9 +53,18 @@ interface TranscriptProps {
   turns: TranscriptTurn[];
   /** Answer a clarification (starts the next turn on the same conversation). */
   onClarify: (option: string) => void;
+  /** Registered datasets — used to ground follow-up suggestions in real columns. */
+  datasets?: DatasetMeta[];
+  /** Run a suggested follow-up question as the next turn. */
+  onFollowUp?: (question: string) => void;
 }
 
-const Transcript: React.FC<TranscriptProps> = ({ turns, onClarify }) => {
+const Transcript: React.FC<TranscriptProps> = ({
+  turns,
+  onClarify,
+  datasets,
+  onFollowUp,
+}) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Only auto-scroll when the user is already near the bottom, so scrolling up
@@ -120,6 +133,16 @@ const Transcript: React.FC<TranscriptProps> = ({ turns, onClarify }) => {
                       columns={outcome.result.columns}
                       rows={outcome.result.rows as string[][]}
                     />
+                    {/* Reading of the result + grounded follow-ups. Rendered
+                        between the chart and the raw table so the takeaway
+                        comes before the detail. */}
+                    <ResultInsights
+                      columns={outcome.result.columns}
+                      rows={outcome.result.rows}
+                      plan={outcome.result.plan}
+                      datasets={datasets}
+                      onFollowUp={onFollowUp}
+                    />
                     <ResultsTable
                       columns={outcome.result.columns}
                       rows={outcome.result.rows as string[][]}
@@ -146,7 +169,9 @@ const Transcript: React.FC<TranscriptProps> = ({ turns, onClarify }) => {
 
             {outcome?.type === "error" && (
               <div className="chat-error">
-                <span className="error-icon">⚠</span>
+                <span className="error-icon">
+                  <Icon name="alert" size={16} />
+                </span>
                 <div>
                   <strong>Query failed</strong>
                   <p>{outcome.message}</p>

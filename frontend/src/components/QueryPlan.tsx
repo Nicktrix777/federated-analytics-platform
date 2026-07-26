@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Icon } from "./ui/Icon";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
 import sql from "react-syntax-highlighter/dist/esm/languages/hljs/sql";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
@@ -39,7 +40,7 @@ const QueryPlanView: React.FC<QueryPlanProps> = ({
         style={{ cursor: "pointer" }}
       >
         <div className="card-title">
-          <span>{expanded ? "▾" : "▸"}</span>
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
           <span className="section-title">Query Plan</span>
           {mode === "ai" && (
             <span className="badge badge--ai">AI</span>
@@ -54,7 +55,7 @@ const QueryPlanView: React.FC<QueryPlanProps> = ({
               className="confidence-meter"
               title={`AI Confidence: ${confidencePct}%`}
             >
-              <span style={{ color: confidenceColor }}>●</span>
+              <span className="confidence-dot" style={{ background: confidenceColor }} />
               <span>{confidencePct}% confident</span>
             </div>
           )}

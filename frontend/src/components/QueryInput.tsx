@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
 import type { QueryMode, QueryStatus } from "../types";
+import { Icon } from "./ui/Icon";
 
 // Raw SQL the backend will accept must start with SELECT or WITH. Anything else
 // submitted in SQL mode (a natural-language question, SHOW/DESCRIBE, etc.) would
@@ -101,7 +102,7 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
         <div className="refine-bar">
           <span className="refine-label">Refine or</span>
           <button className="refine-new-btn" onClick={onNewQuery} type="button">
-            start fresh →
+            start fresh <Icon name="arrow-right" size={12} />
           </button>
         </div>
       )}
@@ -175,7 +176,7 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
             {isLoading ? (
               <><span className="spinner-btn" />Running…</>
             ) : (
-              <><span className="submit-arrow">▶</span>{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
+              <><Icon name="play" size={13} className="submit-arrow" />{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
             )}
           </button>
         </div>

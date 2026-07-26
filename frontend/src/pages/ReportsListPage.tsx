@@ -5,6 +5,7 @@ import { streamAIOperation, SSEConnectionError } from "../api/sse";
 import GenerationProgress from "../components/GenerationProgress";
 import { Button, Modal, Banner, EmptyState, SkeletonGrid, ConfirmDialog } from "../components/ui";
 import { useToast } from "../components/ui/Toast";
+import { Icon } from "../components/ui/Icon";
 import type {
   Report,
   CreateReportPayload,
@@ -189,7 +190,7 @@ export default function ReportsListPage() {
         </div>
         <div className="dl-header-actions">
           <Button variant="primary" onClick={() => setShowAIModal(true)}>
-            ✨ Generate with AI
+            <Icon name="sparkles" size={14} /> Generate with AI
           </Button>
           <Button variant="ghost" onClick={() => setShowModal(true)}>
             + New Report
@@ -209,7 +210,7 @@ export default function ReportsListPage() {
         <SkeletonGrid count={4} />
       ) : reports.length === 0 ? (
         <EmptyState
-          icon="📑"
+          icon={<Icon name="report" size={26} />}
           title="No reports yet"
           description="Create your first report to start delivering formatted Excel workbooks."
           action={{ label: "Create Report", onClick: () => setShowModal(true) }}
@@ -223,7 +224,9 @@ export default function ReportsListPage() {
               style={{ animationDelay: `${index * 30}ms` }}
               onClick={() => navigate(`/reports/${r.id}`)}
             >
-              <div className="dl-card-icon">📑</div>
+              <div className="dl-card-icon">
+                <Icon name="report" size={18} />
+              </div>
               <div className="dl-card-body">
                 <div className="dl-card-name">{r.name}</div>
                 {r.description && (
@@ -242,7 +245,7 @@ export default function ReportsListPage() {
                     navigate(`/reports/${r.id}`);
                   }}
                 >
-                  Open →
+                  Open <Icon name="arrow-right" size={13} />
                 </Button>
                 <Button
                   variant="ghost"
@@ -254,7 +257,7 @@ export default function ReportsListPage() {
                     handleDownload(r.id);
                   }}
                 >
-                  ⬇ Download
+                  <Icon name="download" size={13} /> Download
                 </Button>
                 <Button
                   variant="danger"
@@ -280,8 +283,8 @@ export default function ReportsListPage() {
         boxClass="modal-lg"
       >
         <div className="modal-header">
-          <h2>✨ Generate Report with AI</h2>
-          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating}>✕</button>
+          <h2><Icon name="sparkles" size={16} /> Generate Report with AI</h2>
+          <button className="modal-close" onClick={() => setShowAIModal(false)} disabled={generating} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
         <form onSubmit={handleGenerate} className="modal-form">
           <div className="form-group">
@@ -337,7 +340,7 @@ export default function ReportsListPage() {
       <Modal open={showModal} onClose={() => setShowModal(false)}>
         <div className="modal-header">
           <h2>New Report</h2>
-          <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
+          <button className="modal-close" onClick={() => setShowModal(false)} aria-label="Close"><Icon name="close" size={16} /></button>
         </div>
         <form onSubmit={handleCreate} className="modal-form">
           <div className="form-group">
