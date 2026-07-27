@@ -84,6 +84,27 @@ def validate_and_fix_sql(sql: str, default_limit: int = 1000) -> dict:
     fixed_sql = sql.strip().rstrip(";").rstrip()
     fixed_sql = re.sub(r"\bARRAY_CONTAINS\s*\(", "contains(", fixed_sql, flags=re.IGNORECASE)
 
+    # Auto-fix a recurring LLM mistake: quoting a multi-segment ROW dot-path
+    # (e.g. agency.name.en) as ONE identifier — agency."NAME.EN" — instead of
+    # leaving each segment unquoted and dot-separated. Trino reads a quoted
+    # string as a single literal field name, so a quoted value containing a
+    # "." fails with "Column '...' cannot be resolved" even though every
+    # segment is individually real. Only unquote when the content is plain
+    # dot-separated identifiers (letters/digits/underscore) with no hyphen,
+    # space, or "@" — a genuine special-character name (e.g. "orders-2024.01")
+    # never matches this and is left alone.
+    row_path_fix = re.sub(
+        r'\.\s*"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)"',
+        r".\1",
+        fixed_sql,
+    )
+    if row_path_fix != fixed_sql:
+        issues.append(
+            "INFO: Un-quoted a multi-segment ROW dot-path that was mistakenly "
+            "quoted as one identifier"
+        )
+        fixed_sql = row_path_fix
+
     fixed_normalized = fixed_sql.upper()
     is_aggregation = any(
         kw in fixed_normalized for kw in ("COUNT(", "SUM(", "AVG(", "GROUP BY", "MIN(", "MAX(")

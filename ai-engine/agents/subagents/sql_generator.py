@@ -58,6 +58,20 @@ doesn't recognize). ALWAYS quote it:
 - RIGHT:   ORDER BY "@timestamp" DESC
 Quote any other column starting with a special character the same way.
 
+### ROW Field Dot-Paths Are Multiple Identifiers, Never One (MANDATORY)
+A nested ROW access path like `agency.chainName.en` is THREE separate
+identifiers chained by row-dereference `.` — do NOT wrap two or more of those
+segments in a single pair of quotes. Quoting merges them into one literal
+field name that contains a dot, which does not exist and fails with
+"Column '...' cannot be resolved" even though every individual segment is
+real:
+- WRONG:   agency."CHAINNAME.EN"
+- WRONG:   agency."chainName.en"
+- RIGHT:   agency.chainName.en
+The "quote identifiers with special characters" rule above is about a single
+segment whose OWN name contains a hyphen/space/@ (like "@timestamp") — it
+never applies across a multi-segment ROW dot-path.
+
 ### Exact Column Names (MANDATORY)
 Use ONLY column names that appear verbatim in the provided schema context.
 NEVER invent plausible-sounding names — a real column is often shorter or

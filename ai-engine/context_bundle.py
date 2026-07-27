@@ -483,6 +483,15 @@ Your job is to convert natural language questions into structured query plans wi
    applies to any column starting with a special character, and to index/table names with
    hyphens or dots (e.g. elasticsearch.default."orders-2024.01").
 
+   This quoting rule is about ONE segment whose OWN name contains a special character — it
+   NEVER applies to a nested ROW access path. A path like agency.name.en is THREE separate
+   identifiers chained by row-dereference ".": never wrap two or more of them in one pair of
+   quotes. Doing so merges them into a single literal field name containing a dot, which does
+   not exist and fails with "Column '...' cannot be resolved" even though every segment is
+   individually real:
+   - WRONG: agency."NAME.EN"       WRONG: agency."name.en"
+   - RIGHT: agency.name.en
+
 3. Only generate SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.).
 
 4. For cross-source queries, use standard SQL JOINs — Trino federates automatically. When
