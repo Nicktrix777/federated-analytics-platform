@@ -309,14 +309,17 @@ See `qa/README.md` for what each suite covers and how to run a single spec/scena
 ### Continuous Integration
 
 Every PR against `main` runs `.github/workflows/pr-checks.yml`: Go vet/build/test
-(`core-api`, `query-service`), `ai-engine` pytest, the frontend build, the `env-check`
-drift check, and the full Playwright UX suite end-to-end against a freshly built stack.
-All of it must pass before merging.
+(`core-api`, `query-service`), `ai-engine` pytest, the frontend build, and the `env-check`
+drift check — all of it must pass before merging. The full Playwright UX suite (`e2e-ux`)
+also runs on every PR, but only on the PR itself: it's skipped on the subsequent push to
+`main` once merged, since it's already been verified and re-running it there would just
+burn another round of real LLM quota for no new signal.
 
-`.github/workflows/ai-eval.yml` runs the AI-quality eval nightly (and whenever
-`ai-engine`/`core-api` change on `main`) and publishes the scorecard as a job summary —
-it's a signal to watch for accuracy regressions, not a per-PR gate (`run_eval.py` doesn't
-have a pass/fail threshold today).
+`.github/workflows/ai-eval.yml` runs the AI-quality eval nightly (and on-demand via
+`workflow_dispatch`), publishing the scorecard as a job summary — a signal to watch for
+accuracy regressions, not a per-PR or per-merge gate (`run_eval.py` doesn't have a
+pass/fail threshold today, and running it on every merge would cost more LLM quota than
+it's worth).
 
 ### Contributing
 

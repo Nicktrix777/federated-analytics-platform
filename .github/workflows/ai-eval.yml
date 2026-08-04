@@ -1,18 +1,13 @@
 name: AI Accuracy Eval
 
 # Not a per-PR gate: qa/ai-eval/run_eval.py has no built-in pass/fail threshold,
-# so it can't block an individual PR's merge the way pr-checks.yml does. This
-# runs nightly plus whenever ai-engine/core-api change on main, and surfaces
-# the scorecard in the job summary + as an artifact so a regression is visible
-# without anyone needing to dig through logs.
+# so it can't block an individual PR's merge the way pr-checks.yml does. Runs
+# nightly only (plus on-demand) rather than on every merge — merges to main
+# happen far more often than the eval needs to catch a real regression, and
+# each run spends real LLM quota.
 on:
   schedule:
     - cron: '0 3 * * *'
-  push:
-    branches: [main]
-    paths:
-      - 'ai-engine/**'
-      - 'core-api/**'
   workflow_dispatch: {}
 
 concurrency:
