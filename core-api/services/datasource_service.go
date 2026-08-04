@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/federated-analytics/core-api/crypto"
 	"github.com/federated-analytics/core-api/models"
 )
 
@@ -34,13 +35,15 @@ type DataSourceService struct {
 	db        *sql.DB
 	trinoHost string
 	trinoPort string
+	encryptor *crypto.Encryptor
 }
 
-func NewDataSourceService(db *sql.DB, trinoHost, trinoPort string) *DataSourceService {
+func NewDataSourceService(db *sql.DB, trinoHost, trinoPort string, encryptor *crypto.Encryptor) *DataSourceService {
 	return &DataSourceService{
 		db:        db,
 		trinoHost: trinoHost,
 		trinoPort: trinoPort,
+		encryptor: encryptor,
 	}
 }
 
@@ -122,16 +125,21 @@ func (s *DataSourceService) Create(req models.CreateDataSourceRequest) (*models.
 		extraConfig = "{}"
 	}
 
+	encryptedPassword, err := s.encryptor.Encrypt(req.Password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt datasource credentials: %w", err)
+	}
+
 	var id int
-	err := s.db.QueryRow(`
+	err = s.db.QueryRow(`
 		INSERT INTO data_sources
-		    (name, source_type, host, port, database_name, username, password_encrypted, 
+		    (name, source_type, host, port, database_name, username, password_encrypted,
 		     trino_catalog, extra_config, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, true)
 		RETURNING id
 	`,
 		req.Name, req.SourceType, req.Host, req.Port,
-		req.DatabaseName, req.Username, req.Password,
+		req.DatabaseName, req.Username, encryptedPassword,
 		req.TrinoCatalog, extraConfig,
 	).Scan(&id)
 	if err != nil {

@@ -26,7 +26,7 @@ services:
     environment:
       POSTGRES_DB: analytics_meta
       POSTGRES_USER: meta_user
-      POSTGRES_PASSWORD: meta_pass_2024
+      POSTGRES_PASSWORD: ${POSTGRES_META_PASSWORD:-meta_pass_2024}
     ports:
       - "5434:5432"
     volumes:
@@ -56,7 +56,7 @@ services:
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta
       POSTGRES_META_USER: meta_user
-      POSTGRES_META_PASSWORD: meta_pass_2024
+      POSTGRES_META_PASSWORD: ${POSTGRES_META_PASSWORD:-meta_pass_2024}
     networks:
       - federation-net
     restart: "no"
@@ -138,13 +138,15 @@ services:
   # Federates across Postgres, MongoDB, and Elasticsearch
   # ──────────────────────────────────────────────
   trino:
-    image: trinodb/trino:438
+    image: trinodb/trino:483
     container_name: fap-trino
     ports:
       - "8080:8080"
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/config/config.properties:/etc/trino/config.properties:ro
+      - ./trino/config/resource-groups.properties:/etc/trino/resource-groups.properties:ro
+      - ./trino/config/resource-groups.json:/etc/trino/resource-groups.json:ro
       - ./trino/config/jvm.config:/etc/trino/jvm.config:ro
       - ./trino/config/node.properties:/etc/trino/node.properties:ro
     networks:
@@ -182,6 +184,7 @@ services:
       # value saved in the UI survives restarts.
       LLM_MODEL: ${LLM_MODEL:-google_genai:gemini-flash-latest}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_API_KEYS: ${GOOGLE_API_KEYS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SCHEMA_ANALYST_MODEL: ${SCHEMA_ANALYST_MODEL:-google_genai:gemini-flash-lite-latest}
@@ -209,7 +212,7 @@ services:
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta
       POSTGRES_META_USER: meta_user
-      POSTGRES_META_PASSWORD: meta_pass_2024
+      POSTGRES_META_PASSWORD: ${POSTGRES_META_PASSWORD:-meta_pass_2024}
       TRINO_HOST: trino
       TRINO_PORT: 8080
     ports:
@@ -270,11 +273,13 @@ services:
       QUERY_SERVICE_URL: http://query-service:8083
       AI_ENABLED: ${AI_ENABLED:-true}
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-poc-demo-token-2024}
+      ALLOW_DEV_DEFAULTS: ${ALLOW_DEV_DEFAULTS:-false}
+      DATASOURCE_ENCRYPTION_KEY: ${DATASOURCE_ENCRYPTION_KEY:-}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta
       POSTGRES_META_USER: meta_user
-      POSTGRES_META_PASSWORD: meta_pass_2024
+      POSTGRES_META_PASSWORD: ${POSTGRES_META_PASSWORD:-meta_pass_2024}
       POSTGRES_SOURCE_HOST: postgres-source
       POSTGRES_SOURCE_PORT: 5432
       POSTGRES_SOURCE_DB: ${POSTGRES_SOURCE_DB:-source_db}

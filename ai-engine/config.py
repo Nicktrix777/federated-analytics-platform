@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", description="Anthropic API key — deepagents anthropic: path")
     openai_api_key: str = Field(default="", description="OpenAI API key — deepagents openai: path / real-OpenAI custom providers")
 
+    # Optional pool of Gemini keys for round-robin + rate-limit failover across
+    # google_genai: models (llm_model, sql_generator_model, fast_path_model,
+    # schema_analyst_model, dashboard_widget_sql_model, embedding_model). ONLY
+    # helps if each key is from a SEPARATE Google Cloud project — Gemini's rate
+    # limits are enforced per project, not per key, so multiple keys in the same
+    # project share one quota bucket and give zero benefit. Comma-separated;
+    # falls back to google_api_key (single) when empty.
+    google_api_keys: str = Field(
+        default="",
+        description="Comma-separated Gemini keys from SEPARATE Google Cloud projects, for round-robin/failover. Falls back to google_api_key if empty.",
+    )
+
     # Endpoint + key for the `openai_compat:` and `ollama:` provider prefixes
     # ONLY (a generic self-hosted / OpenAI-compatible gateway or local runtime).
     # These are NO LONGER a global default for the custom path — every model

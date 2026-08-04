@@ -15,6 +15,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/federated-analytics/core-api/config"
+	"github.com/federated-analytics/core-api/crypto"
 	"github.com/federated-analytics/core-api/handlers"
 	"github.com/federated-analytics/core-api/middleware"
 	"github.com/federated-analytics/core-api/services"
@@ -37,12 +38,16 @@ func main() {
 	log.Println("Connected to metadata database")
 
 	// ── Services ────────────────────────────────────
+	encryptor, err := crypto.NewEncryptor(cfg.DatasourceEncryptionKey)
+	if err != nil {
+		log.Fatalf("Failed to initialize datasource encryptor: %v", err)
+	}
 	aiClient := services.NewAIClient(cfg.AIEngineURL)
 	queryClient := services.NewQueryClient(cfg.QueryServiceURL)
 	metadataSvc := services.NewMetadataService(db)
 	uploadSvc := services.NewUploadService(cfg.SourceDSN, db)
 	dataSourceSvc := services.NewDataSourceService(
-		db, cfg.TrinoHost, cfg.TrinoPort,
+		db, cfg.TrinoHost, cfg.TrinoPort, encryptor,
 	)
 	dashboardSvc := services.NewDashboardService(db)
 	reportSvc := services.NewReportService(db)

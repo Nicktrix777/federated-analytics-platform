@@ -73,7 +73,8 @@ from context_bundle import (
 from events import EventEmitter, NullEmitter
 from llm.openai_provider import OpenAIProvider
 from llm.anthropic_provider import AnthropicProvider
-from llm.providers import build_tier_limiters, make_custom_provider
+from llm.providers import build_tier_limiters, make_custom_provider, parse_model
+from llm.rotating_provider import RotatingProvider
 from llm_settings import (
     SettingsValidationError,
     apply_config_overlay,
@@ -88,7 +89,7 @@ from embeddings import reindex_examples
 from enrichment import watch_metadata_version
 
 # A custom single-shot provider is either OpenAI-compatible or Anthropic.
-CustomProvider = OpenAIProvider | AnthropicProvider
+CustomProvider = OpenAIProvider | AnthropicProvider | RotatingProvider
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,7 +102,26 @@ logger = logging.getLogger(__name__)
 # The dashboard/report designers are no longer deepagents graphs (PR-A1) — they
 # run as a deterministic two-call pipeline through _widget_sql_provider below,
 # so only the chat query planner needs a compiled agent.
-_agent = None
+#
+# _agent_pool holds one compiled agent per Gemini key when GOOGLE_API_KEYS has
+# multiple SEPARATE-project keys configured (see config.py) — a single chat
+# run's multi-turn ReAct loop stays on one key throughout (simpler + safer than
+# swapping keys mid-graph), and _pick_agent() round-robins ACROSS runs so
+# concurrent /api/plan calls spread across keys/quota pools. Length 1 when
+# there's just one key — identical behavior to before rotation existed.
+_agent_pool: list = []
+_agent_pool_idx = 0
+
+
+def _pick_agent():
+    """Round-robin the next pooled agent. Callers must check `_agent_pool`
+    truthiness first (mirrors the old `_agent is None` check)."""
+    global _agent_pool_idx
+    idx = _agent_pool_idx % len(_agent_pool)
+    _agent_pool_idx += 1
+    if len(_agent_pool) > 1:
+        logger.info("chat plan -> agent key %d/%d", idx + 1, len(_agent_pool))
+    return _agent_pool[idx]
 
 # Fast-path provider is created ONCE at startup and reused for every request.
 # The Async client inside it keeps a persistent connection pool to the LLM
@@ -192,6 +212,17 @@ def _export_provider_keys() -> None:
         os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
 
 
+def _google_key_pool() -> list[str]:
+    """Gemini keys to round-robin across. GOOGLE_API_KEYS (comma-separated) wins
+    if set; otherwise falls back to the single GOOGLE_API_KEY. Only meaningful
+    when each key is from a separate Google Cloud project — see config.py."""
+    if settings.google_api_keys.strip():
+        keys = [k.strip() for k in settings.google_api_keys.split(",") if k.strip()]
+        if keys:
+            return keys
+    return [settings.google_api_key]
+
+
 def _build_llm_stack() -> None:
     """(Re)build tier limiters, custom single-shot providers, and the three
     deepagents into the module globals from the CURRENT settings.
@@ -203,26 +234,65 @@ def _build_llm_stack() -> None:
     (set to None, logged) when its required cloud key is missing, which degrades
     only that feature (e.g. no embeddings key → RAG falls back to full catalog).
     """
-    global _agent
+    global _agent_pool, _agent_pool_idx
     global _fast_provider, _widget_sql_provider, _embed_provider
 
     _export_provider_keys()
-    limiters = build_tier_limiters()
+
+    google_keys = _google_key_pool()
+    # One independent limiter-dict PER KEY so each key's own quota is paced
+    # separately — reusing one limiter dict across keys would still cap the
+    # COMBINED call rate at a single key's RPM, defeating the whole pool.
+    limiter_pool = [build_tier_limiters() for _ in google_keys]
+
+    def _is_google(model_string: str) -> bool:
+        provider, _ = parse_model(model_string)
+        return provider == "google_genai"
+
+    def _build_custom_pool(model_string: str, tier: str):
+        """One provider per key + RotatingProvider wrap when this model uses
+        google_genai and there's more than one key; unchanged single-provider
+        behavior (one shared limiter) otherwise — no regression for the
+        single-key / non-Gemini case."""
+        if _is_google(model_string) and len(google_keys) > 1:
+            built = [
+                make_custom_provider(model_string, limiter_pool[i][tier], api_key_override=google_keys[i])
+                for i in range(len(google_keys))
+            ]
+            built = [p for p in built if p is not None]
+            if not built:
+                return None
+            return built[0] if len(built) == 1 else RotatingProvider(built)
+        return make_custom_provider(model_string, limiter_pool[0][tier])
 
     # Custom single-shot path (fast plan / widget+sheet SQL / repair / embeddings /
     # dashboard+report design calls — see agents/dashboard_planner.py, agents/report_planner.py).
-    _fast_provider = make_custom_provider(settings.fast_path_model, limiters["fast"])
-    _widget_sql_provider = make_custom_provider(settings.dashboard_widget_sql_model, limiters["frontier"])
-    _embed_provider = make_custom_provider(settings.embedding_model, limiters["embed"])
+    _fast_provider = _build_custom_pool(settings.fast_path_model, "fast")
+    _widget_sql_provider = _build_custom_pool(settings.dashboard_widget_sql_model, "frontier")
+    _embed_provider = _build_custom_pool(settings.embedding_model, "embed")
 
     # deepagents path — only the chat query planner (schema-analyst + sql-generator)
     # still runs as a ReAct loop; report/dashboard generation is deterministic (PR-A1).
-    _agent = create_query_planner(model=settings.llm_model, limiters=limiters)
+    # One full agent graph (orchestrator + both subagents) per key when pooled —
+    # a single chat run's multi-turn loop stays on one key throughout (no mid-graph
+    # key swap); _pick_agent() round-robins ACROSS runs. native google_genai reads
+    # GOOGLE_API_KEY from the environment at construction time (unlike the custom
+    # providers above, which take an explicit key) — see _export_provider_keys.
+    if _is_google(settings.llm_model) and len(google_keys) > 1:
+        pool = []
+        for i, key in enumerate(google_keys):
+            os.environ["GOOGLE_API_KEY"] = key
+            pool.append(create_query_planner(model=settings.llm_model, limiters=limiter_pool[i]))
+        os.environ["GOOGLE_API_KEY"] = google_keys[0]  # restore a sane default post-build
+        _agent_pool = pool
+    else:
+        _agent_pool = [create_query_planner(model=settings.llm_model, limiters=limiter_pool[0])]
+    _agent_pool_idx = 0
 
     logger.info(
-        "LLM stack ready — deepagents=%s | fast=%s | widget/sheet=%s | embed=%s | "
-        "rpm(frontier/fast/embed)=%s/%s/%s",
-        settings.llm_model,
+        "LLM stack ready — deepagents=%s (%d key%s) | fast=%s | widget/sheet=%s | embed=%s | "
+        "rpm(frontier/fast/embed)=%s/%s/%s per key",
+        settings.llm_model, len(_agent_pool), "" if len(_agent_pool) == 1 else "s",
         settings.fast_path_model if _fast_provider else "DISABLED(no key)",
         settings.dashboard_widget_sql_model if _widget_sql_provider else "DISABLED(no key)",
         settings.embedding_model if _embed_provider else "DISABLED(no key)",
@@ -269,7 +339,7 @@ async def watch_llm_settings_version() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _watcher_task, _settings_watcher_task, _agent
+    global _watcher_task, _settings_watcher_task, _agent_pool
     try:
         # Apply the DB config overlay (non-secret UI-editable fields) on top of
         # the env defaults BEFORE building the stack, so a saved config survives
@@ -293,7 +363,7 @@ async def lifespan(app: FastAPI):
             _spawn_stream_task(_reindex_examples_safe())
     except Exception as e:
         logger.warning(f"Agent init failed: {e}. AI mode will return errors.")
-        _agent = None
+        _agent_pool = []
     yield
     for task in (_watcher_task, _settings_watcher_task):
         if task is not None:
@@ -340,7 +410,8 @@ async def health():
         "version": "2.1.0",
         "agent": "deepagents",
         "model": settings.llm_model,
-        "agent_ready": _agent is not None,
+        "agent_ready": bool(_agent_pool),
+        "agent_key_pool_size": len(_agent_pool),
         "fast_path_enabled": settings.fast_path_enabled,
         "fast_path_model": settings.fast_path_model,
     }
@@ -523,7 +594,7 @@ async def _run_plan_pipeline(request: PlanRequest, emitter: EventEmitter) -> Tup
                     path_used = "fast"
 
         if plan is None:
-            if _agent is None:
+            if not _agent_pool:
                 raise HTTPException(
                     status_code=503,
                     detail=(
@@ -562,7 +633,7 @@ async def _run_plan_pipeline(request: PlanRequest, emitter: EventEmitter) -> Tup
             if fastpath_hint:
                 extra_context = f"{extra_context}\n\n{fastpath_hint}" if extra_context else fastpath_hint
             try:
-                result = await generate_query_plan(_agent, request.question, extra_context, emitter=emitter)
+                result = await generate_query_plan(_pick_agent(), request.question, extra_context, emitter=emitter)
                 # PR5: the orchestrator may return a Clarification.
                 if isinstance(result, Clarification):
                     elapsed = time.monotonic() - start

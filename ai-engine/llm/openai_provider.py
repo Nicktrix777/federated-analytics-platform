@@ -237,8 +237,12 @@ class OpenAIProvider:
         """
         if not texts:
             return []
-        logger.info(f"Embedding {len(texts)} text(s) with {model} (dims={dimensions or 'default'})")
-        kwargs: dict = {"model": model, "input": texts}
+        # Callers pass the provider-prefixed config string (e.g.
+        # "google_genai:gemini-embedding-001"); this client talks to one
+        # OpenAI-compatible endpoint, which wants the bare model id.
+        model_id = model.split(":", 1)[1] if ":" in model else model
+        logger.info(f"Embedding {len(texts)} text(s) with {model_id} (dims={dimensions or 'default'})")
+        kwargs: dict = {"model": model_id, "input": texts}
         if dimensions:
             kwargs["dimensions"] = dimensions
         await self._acquire()

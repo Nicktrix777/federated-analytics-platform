@@ -125,17 +125,23 @@ def key_present(model_string: str) -> bool:
 
 
 def make_custom_provider(
-    model_string: str, rate_limiter: InMemoryRateLimiter | None = None
+    model_string: str,
+    rate_limiter: InMemoryRateLimiter | None = None,
+    api_key_override: str | None = None,
 ):
     """Build the custom single-shot provider (fast path, widget/sheet SQL,
     repair, embeddings) for `model_string`.
 
     Returns an OpenAIProvider or AnthropicProvider, or None when the required
     cloud key is missing (caller disables that feature and logs why).
+
+    `api_key_override` bypasses the normal settings-derived key (used to build
+    one provider per key when pooling across separate-project Gemini keys —
+    see main.py's _build_llm_stack / RotatingProvider).
     """
     provider, model_id = parse_model(model_string)
     conf = PROVIDERS[provider]
-    key = resolve_key(provider)
+    key = api_key_override if api_key_override is not None else resolve_key(provider)
 
     if conf.key_setting not in (None, "llm_api_key") and not key:
         logger.warning(
