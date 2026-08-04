@@ -28,6 +28,15 @@ OPENAI_API_KEY=sk-...        # your OpenAI key
 ANTHROPIC_API_KEY=sk-ant-...  # your Anthropic key
 ```
 
+**New machine or coming back after a while?** `make setup` does the above for
+you — creates `.env` from `.env.example` if it doesn't exist yet and generates
+`DATASOURCE_ENCRYPTION_KEY`, without ever overwriting an `.env` you already have.
+
+Before pushing, run `make env-check` — it's the same drift check
+(`scripts/check-env-sync.py`) that runs in CI on every PR, so a `.env.example`/
+`docker-compose.yml` mismatch (a var one of them references that the other
+doesn't know about) shows up locally instead of as a failed check.
+
 ### 3. Start the Stack
 
 ```bash
@@ -244,6 +253,72 @@ federated-analytics-platform/
     └── versions/
         └── 0001_baseline_schema.py   # full metadata schema, applied by db-migrate
 ```
+
+---
+
+## Development & Testing
+
+### First-time setup
+
+```bash
+git clone <this-repo>
+cd federated-analytics-platform
+make setup        # creates .env from .env.example + generates DATASOURCE_ENCRYPTION_KEY
+```
+
+Edit `.env` and set at least one LLM key (`GOOGLE_API_KEY`, `OPENAI_API_KEY`, or
+`ANTHROPIC_API_KEY` — Gemini is the default provider, see `.env.example`).
+
+### Running the stack
+
+| Command | What it does |
+|---|---|
+| `make up` | Prod-like stack (`docker-compose.yml` only) — matches what CI/a real deploy runs |
+| `make dev` | Dev stack with hot reload — `air` recompiles Go on save, Vite HMR for the frontend, no rebuild needed per edit |
+| `make down` / `make dev-down` | Stop the respective stack |
+| `make ps` / `make logs` | Status / follow logs for whichever stack is running |
+| `make fresh-start` / `make dev-fresh-start` | Wipe all data, rebuild, start, and seed — for testing the full flow from empty |
+
+Use `make dev` day-to-day; `make up` if you want to test exactly what CI/production builds.
+
+### Before you push
+
+```bash
+make env-check     # catches .env.example / docker-compose.yml drift — same check CI runs
+```
+
+### Running the QA suites
+
+Both need a running, seeded stack (`make up && make seed-all`, then sync catalogs — see
+`qa/README.md`). **Run them one at a time**, not together — they share one LLM backend's
+rate limit.
+
+```bash
+./qa/run.sh                        # Playwright UX suite (headless Chromium, no host deps)
+python3 qa/ai-eval/run_eval.py      # AI-quality eval (deterministic checks)
+python3 qa/ai-eval/run_eval.py --judge   # + LLM-as-judge scoring (needs OPENAI_API_KEY)
+```
+
+See `qa/README.md` for what each suite covers and how to run a single spec/scenario.
+
+### Continuous Integration
+
+Every PR against `main` runs `.github/workflows/pr-checks.yml`: Go vet/build/test
+(`core-api`, `query-service`), `ai-engine` pytest, the frontend build, the `env-check`
+drift check, and the full Playwright UX suite end-to-end against a freshly built stack.
+All of it must pass before merging.
+
+`.github/workflows/ai-eval.yml` runs the AI-quality eval nightly (and whenever
+`ai-engine`/`core-api` change on `main`) and publishes the scorecard as a job summary —
+it's a signal to watch for accuracy regressions, not a per-PR gate (`run_eval.py` doesn't
+have a pass/fail threshold today).
+
+### Contributing
+
+1. Branch off `main`.
+2. Make your change; run the relevant QA suite(s) and `make env-check` locally.
+3. Open a PR — `pr-checks.yml` runs automatically.
+4. Merge once it's green.
 
 ---
 

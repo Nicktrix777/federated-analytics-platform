@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help seed-employees seed-contracts seed-all \
+.PHONY: help setup env-check seed-employees seed-contracts seed-all \
 	up down build dev dev-down dev-build logs ps \
 	wipe fresh-start dev-wipe dev-fresh-start
 
@@ -11,6 +11,12 @@ DEV_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.dev.yml
 
 help:
 	@echo "Federated Analytics Platform"
+	@echo ""
+	@echo "  make setup       First-time / reset setup: create .env from .env.example"
+	@echo "                   if missing, generate DATASOURCE_ENCRYPTION_KEY, then"
+	@echo "                   run env-check. Fill in an LLM key afterward."
+	@echo "  make env-check   Verify .env.example and docker-compose*.yml haven't drifted"
+	@echo "                   (same check CI runs on every PR — run before pushing)"
 	@echo ""
 	@echo "  make up          Start the PROD stack (docker compose up -d --build)"
 	@echo "  make down        Stop the prod stack"
@@ -47,6 +53,37 @@ help:
 	@echo "Always use these targets (or pass --build yourself) instead of a bare"
 	@echo "'docker compose up' after code changes — without --build, Compose reuses"
 	@echo "whatever image already has that tag, which may be out of date."
+
+# First-time setup or post-wipe reset: get from a bare clone to a fillable .env
+# without hand-copying/generating anything. Safe to re-run — never overwrites
+# an existing .env, and DATASOURCE_ENCRYPTION_KEY is only generated if blank.
+setup:
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "Created .env from .env.example."; \
+	else \
+		echo ".env already exists — leaving it alone."; \
+	fi
+	@if ! grep -q '^DATASOURCE_ENCRYPTION_KEY=.\+' .env; then \
+		KEY=$$(openssl rand -base64 32); \
+		if grep -q '^DATASOURCE_ENCRYPTION_KEY=' .env; then \
+			sed -i.bak "s|^DATASOURCE_ENCRYPTION_KEY=.*|DATASOURCE_ENCRYPTION_KEY=$$KEY|" .env && rm -f .env.bak; \
+		else \
+			echo "DATASOURCE_ENCRYPTION_KEY=$$KEY" >> .env; \
+		fi; \
+		echo "Generated DATASOURCE_ENCRYPTION_KEY."; \
+	fi
+	@$(MAKE) env-check
+	@echo ""
+	@echo "Next: edit .env and set at least one LLM key (GOOGLE_API_KEY/OPENAI_API_KEY/"
+	@echo "ANTHROPIC_API_KEY), then 'make up' or 'make dev'."
+
+# Same check CI runs on every PR (scripts/check-env-sync.py) — catches a var
+# referenced in docker-compose*.yml with no matching .env.example entry, or a
+# password/secret/token/key hardcoded instead of ${...}-interpolated. Run this
+# before pushing instead of finding out from a failed PR check.
+env-check:
+	@$(PYTHON) scripts/check-env-sync.py
 
 up:
 	docker compose up -d --build
