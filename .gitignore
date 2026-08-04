@@ -43,3 +43,6 @@ env/
 
 # Project specific
 build.log
+
+# Internal business/competitive research — not for the public repo
+docs/productionization-roadmap.md
