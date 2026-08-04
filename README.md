@@ -258,6 +258,11 @@ federated-analytics-platform/
 
 ## Development & Testing
 
+### Getting access
+
+This repo is private. Ask the owner to add you as a collaborator (GitHub username or
+the email tied to your GitHub account) before cloning.
+
 ### First-time setup
 
 ```bash
@@ -315,10 +320,19 @@ have a pass/fail threshold today).
 
 ### Contributing
 
-1. Branch off `main`.
-2. Make your change; run the relevant QA suite(s) and `make env-check` locally.
-3. Open a PR — `pr-checks.yml` runs automatically.
-4. Merge once it's green.
+1. **Never push directly to `main`** — always branch and open a PR, even for small
+   changes. (This is a team convention, not a GitHub-enforced rule: classic branch
+   protection/rulesets require GitHub Pro on a private repo, so nothing technically
+   stops a direct push today — treat this as the actual rule anyway.)
+2. Push your branch **to this repo, not a fork** — collaborators have write access
+   here, and GitHub withholds Actions secrets (`GOOGLE_API_KEY`, etc.) from PRs
+   opened from forks, so a fork-based PR's `e2e-ux`/AI checks would fail for reasons
+   unrelated to your change.
+3. Make your change; run the relevant QA suite(s) and `make env-check` locally.
+4. Open a PR against `main` — `pr-checks.yml` runs automatically (Go vet/build/test,
+   ai-engine pytest, frontend build, env-check, full Playwright e2e). All of it needs
+   to pass.
+5. Get the repo owner to review and merge. Don't self-merge.
 
 ---
 
