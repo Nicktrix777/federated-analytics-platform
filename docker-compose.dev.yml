@@ -1,0 +1,75 @@
+# Dev-mode overlay — live reload on source changes.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Leaves docker-compose.yml untouched so the plain `docker compose up` path
+# (e.g. for a demo) keeps building the production images exactly as before.
+#
+# - core-api / query-service (Go): air watches *.go and rebuilds+restarts
+#   the binary in-container.
+# - ai-engine (Python): uvicorn --reload watches *.py.
+# - frontend: Vite dev server with HMR instead of the Nginx static build.
+
+volumes:
+  core-api-gomod-cache:
+  query-service-gomod-cache:
+
+services:
+  # One-shot schema migrator — reuse the ai-engine dev image (which has alembic
+  # installed) and bind-mount the source so migration files are live.
+  db-migrate:
+    image: fap-ai-engine:dev
+    volumes: !override
+      - ./ai-engine:/app
+
+  # Each dev service below gets its own `image:` tag distinct from the prod
+  # compose file's default (<project>-<service>). Without this, `docker
+  # compose build`/`up --build` here overwrites the SAME image tag the plain
+  # `docker compose up` (docker-compose.yml only) expects — and since Compose
+  # only rebuilds an image if it's missing, a later plain `up` silently reuses
+  # the dev image (air/vite CMD, no source baked in, no bind mount) and
+  # crash-loops. Ask us how we know.
+  core-api:
+    image: fap-core-api:dev
+    build: !override
+      context: ./core-api
+      dockerfile: Dockerfile.dev
+    volumes: !override
+      - ./core-api:/app
+      - core-api-gomod-cache:/go/pkg/mod
+    ports: !override
+      - "8081:8081"
+
+  query-service:
+    image: fap-query-service:dev
+    build: !override
+      context: ./query-service
+      dockerfile: Dockerfile.dev
+    volumes: !override
+      - ./query-service:/app
+      - query-service-gomod-cache:/go/pkg/mod
+    ports: !override
+      - "8083:8083"
+
+  ai-engine:
+    image: fap-ai-engine:dev
+    volumes: !override
+      - ./ai-engine:/app
+    command: ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8082", "--reload"]
+    ports: !override
+      - "8082:8082"
+
+  frontend:
+    image: fap-frontend:dev
+    build: !override
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      VITE_PROXY_TARGET: http://core-api:8081
+      VITE_API_TOKEN: ${VITE_API_TOKEN:-poc-demo-token-2024}
+    volumes: !override
+      - ./frontend:/app
+      - /app/node_modules
+    ports: !override
+      - "3000:5173"

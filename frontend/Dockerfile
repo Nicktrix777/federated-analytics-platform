@@ -26,6 +26,7 @@ RUN echo 'server { \
   index index.html; \
   location /api/ { \
     proxy_pass http://core-api:8081; \
+    proxy_read_timeout 300s; \
     proxy_set_header Host $host; \
     proxy_set_header X-Real-IP $remote_addr; \
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \

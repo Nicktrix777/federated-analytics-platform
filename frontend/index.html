@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Shim `process` for browser code. Some deps (e.g. react-draggable's
+      // `process.env.DRAGGABLE_DEBUG` check, hit on every drag) reference bare
+      // process.env, which Vite does NOT replace — the resulting "process is
+      // not defined" throw inside the drag handler aborts react-grid-layout
+      // drag/resize entirely. This makes such reads return undefined instead.
+      window.process = window.process || { env: {} };
+    </script>
     <title>Federated Analytics Platform</title>
     <meta
       name="description"
@@ -19,6 +27,24 @@
       type="image/svg+xml"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🔗</text></svg>"
     />
+    <script>
+      // Apply the saved/preferred theme before first paint (no flash).
+      (function () {
+        try {
+          var saved = localStorage.getItem("fiq-theme");
+          var theme =
+            saved === "light" || saved === "dark"
+              ? saved
+              : window.matchMedia &&
+                window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

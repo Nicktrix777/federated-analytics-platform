@@ -1,0 +1,178 @@
+[
+  {
+    "id": "pg-avg-salary-by-dept",
+    "source": "postgres", "category": "aggregation",
+    "question": "What is the average salary per department?",
+    "expect_rows": true, "expect_sql_contains": ["postgres_source"]
+  },
+  {
+    "id": "pg-top5-paid",
+    "source": "postgres", "category": "top-n",
+    "question": "Who are the 5 highest-paid employees and what do they earn?",
+    "expect_rows": true, "expect_sql_contains": ["employees"]
+  },
+  {
+    "id": "pg-headcount-by-dept",
+    "source": "postgres", "category": "group-count",
+    "question": "How many employees are in each department?",
+    "expect_rows": true, "expect_sql_contains": ["postgres_source"]
+  },
+  {
+    "id": "pg-avg-rating-by-quarter",
+    "source": "postgres", "category": "aggregation",
+    "question": "What was the average performance rating in each quarter?",
+    "expect_rows": true, "expect_sql_contains": ["performance_reviews"]
+  },
+  {
+    "id": "pg-highest-paid-dept",
+    "source": "postgres", "category": "agg-topn",
+    "question": "Which department has the highest average salary?",
+    "expect_rows": true, "expect_sql_contains": ["postgres_source"]
+  },
+  {
+    "id": "pg-semantic-synonyms",
+    "source": "postgres", "category": "semantic-mapping",
+    "question": "On average, how much do we pay the people on each team?",
+    "expect_rows": true, "expect_sql_contains": ["postgres_source"],
+    "note": "team=department, pay=salary — tests semantic mapping to real columns"
+  },
+  {
+    "id": "mongo-task-status-breakdown",
+    "source": "mongo", "category": "group-count",
+    "question": "How many tasks are there in each status?",
+    "expect_rows": true, "expect_sql_contains": ["mongodb"]
+  },
+  {
+    "id": "mongo-tasks-per-employee-top10",
+    "source": "mongo", "category": "top-n",
+    "question": "Which 10 employees have the most tasks assigned to them?",
+    "expect_rows": true, "expect_sql_contains": ["mongodb"]
+  },
+  {
+    "id": "mongo-distinct-skills",
+    "source": "mongo", "category": "array-handling",
+    "question": "What are the distinct skills listed across all employee profiles?",
+    "expect_rows": true, "expect_sql_contains": ["mongodb"],
+    "note": "skills is an array field in Mongo — tests array unnest/distinct"
+  },
+  {
+    "id": "mongo-count-with-certs",
+    "source": "mongo", "category": "array-handling",
+    "question": "How many employee profiles have at least one certification?",
+    "expect_rows": true, "expect_sql_contains": ["mongodb"]
+  },
+  {
+    "id": "es-total-contracts",
+    "source": "elasticsearch", "category": "count",
+    "question": "How many contracts are there in total?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch", "contracts"]
+  },
+  {
+    "id": "es-contracts-by-status",
+    "source": "elasticsearch", "category": "group-count",
+    "question": "How many contracts are there for each status?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"]
+  },
+  {
+    "id": "es-contracts-by-kind",
+    "source": "elasticsearch", "category": "group-count",
+    "question": "Break down the contracts by their kind.",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"]
+  },
+  {
+    "id": "es-nested-driver-nationality-ind",
+    "source": "elasticsearch", "category": "nested-filter",
+    "question": "How many contracts have at least one driver whose nationality is IND?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"]
+  },
+  {
+    "id": "es-nested-top-driver-nationalities",
+    "source": "elasticsearch", "category": "nested-topn",
+    "question": "What are the top 5 driver nationalities by number of contracts?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"]
+  },
+  {
+    "id": "es-nested-avg-drivers",
+    "source": "elasticsearch", "category": "nested-agg",
+    "question": "On average, how many drivers are on a contract?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"]
+  },
+  {
+    "id": "es-nested-multi-driver",
+    "source": "elasticsearch", "category": "nested-cardinality",
+    "question": "How many contracts have more than one driver?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"]
+  },
+  {
+    "id": "es-deep-nested-any-fine",
+    "source": "elasticsearch", "category": "deep-nested",
+    "question": "How many contracts have at least one fine recorded in their charges?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"],
+    "note": "charges -> chargeDetails -> fines: two+ levels of array nesting"
+  },
+  {
+    "id": "es-deep-nested-toll-total",
+    "source": "elasticsearch", "category": "deep-nested-agg",
+    "question": "What is the total amount of tolls across all contracts?",
+    "expect_rows": true, "nested": true, "expect_sql_contains": ["UNNEST"],
+    "note": "deep nested numeric aggregation through charges.chargeDetails.tolls"
+  },
+  {
+    "id": "es-contracts-per-month",
+    "source": "elasticsearch", "category": "time-series",
+    "question": "How many contracts were created per month?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"]
+  },
+  {
+    "id": "es-agency-most-contracts",
+    "source": "elasticsearch", "category": "row-field-group",
+    "question": "Which agency has the most contracts?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"]
+  },
+  {
+    "id": "es-nested-customer-nationality-gbr",
+    "source": "elasticsearch", "category": "nested-filter-literal",
+    "question": "How many contracts have a customer whose nationality is GBR?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"],
+    "note": "tests use of a real nested literal value"
+  },
+  {
+    "id": "xsrc-task-completion-by-dept",
+    "source": "cross-source", "category": "join",
+    "question": "What is the task completion rate per department?",
+    "expect_rows": true, "expect_sql_contains": ["mongodb", "postgres_source"],
+    "note": "joins Mongo tasks to Postgres employees/departments on employee_id"
+  },
+  {
+    "id": "xsrc-skills-and-salary",
+    "source": "cross-source", "category": "join",
+    "question": "List employees with their skills and their salary.",
+    "expect_rows": true, "expect_sql_contains": ["mongodb", "postgres_source"]
+  },
+  {
+    "id": "xsrc-salary-vs-tasks",
+    "source": "cross-source", "category": "join-agg",
+    "question": "For each department, show total salary and the number of tasks.",
+    "expect_rows": true, "expect_sql_contains": ["postgres_source"]
+  },
+  {
+    "id": "edge-vague",
+    "source": "any", "category": "robustness-vague",
+    "question": "Show me the important stuff.",
+    "expect_rows": false, "allow_clarification": true,
+    "note": "should ask a clarifying question or degrade gracefully — never crash"
+  },
+  {
+    "id": "edge-out-of-scope",
+    "source": "any", "category": "robustness-oos",
+    "question": "What is the average temperature on Mars?",
+    "expect_rows": false, "allow_clarification": true, "allow_zero_rows": true,
+    "note": "no such data — should clarify/decline, not hallucinate a nonsense query that errors"
+  },
+  {
+    "id": "es-date-range-2024",
+    "source": "elasticsearch", "category": "time-filter",
+    "question": "How many contracts were created in 2024?",
+    "expect_rows": true, "expect_sql_contains": ["elasticsearch"]
+  }
+]

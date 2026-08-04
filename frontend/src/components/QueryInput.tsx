@@ -1,5 +1,14 @@
 import React, { useState, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
 import type { QueryMode, QueryStatus } from "../types";
+import { Icon } from "./ui/Icon";
+
+// Raw SQL the backend will accept must start with SELECT or WITH. Anything else
+// submitted in SQL mode (a natural-language question, SHOW/DESCRIBE, etc.) would
+// fail the validator, so it's better routed to AI.
+const looksLikeSQL = (text: string): boolean => {
+  const t = text.trim().toUpperCase();
+  return t.startsWith("SELECT") || t.startsWith("WITH");
+};
 
 export interface QueryInputHandle {
   insertText: (text: string) => void;
@@ -61,7 +70,17 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!question.trim() || isLoading) return;
-    onSubmit(question.trim(), mode);
+    const q = question.trim();
+    // Guard the common trap: mode left on SQL from a previous query, then a
+    // natural-language question typed. Rather than fail it against the
+    // SELECT/WITH validator, route it to AI when AI is available and it isn't
+    // actually SQL. Real SQL (SELECT/WITH) is submitted as-is.
+    let effectiveMode = mode;
+    if (mode === "sql" && aiEnabled && !looksLikeSQL(q)) {
+      effectiveMode = "ai";
+      setMode("ai");
+    }
+    onSubmit(q, effectiveMode);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -72,10 +91,7 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
 
   const handleExampleClick = (example: string) => {
     setQuestion(example);
-    const looksLikeSQL =
-      example.trim().toUpperCase().startsWith("SELECT") ||
-      example.trim().toUpperCase().startsWith("WITH");
-    if (looksLikeSQL) setMode("sql");
+    if (looksLikeSQL(example)) setMode("sql");
     else if (aiEnabled) setMode("ai");
     textareaRef.current?.focus();
   };
@@ -86,7 +102,7 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
         <div className="refine-bar">
           <span className="refine-label">Refine or</span>
           <button className="refine-new-btn" onClick={onNewQuery} type="button">
-            start fresh →
+            start fresh <Icon name="arrow-right" size={12} />
           </button>
         </div>
       )}
@@ -126,8 +142,8 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
               mode === "ai"
                 ? hasResults
                   ? "Refine your analysis…"
-                  : 'Ask anything… e.g., "What are the top 5 products by revenue?"'
-                : "Trino SQL… e.g., SELECT * FROM postgres_source.public.orders LIMIT 10"
+                  : 'Ask anything… e.g., "How many contracts are there by status?"'
+                : `Trino SQL… e.g., SELECT * FROM elasticsearch.default."contracts-v2.40" LIMIT 10`
             }
             rows={hasResults ? 2 : 4}
             disabled={isLoading}
@@ -158,9 +174,9 @@ const QueryInput = forwardRef<QueryInputHandle, QueryInputProps>(({
             style={hasResults ? { marginLeft: "auto" } : {}}
           >
             {isLoading ? (
-              <><span className="spinner" />Running…</>
+              <><span className="spinner-btn" />Running…</>
             ) : (
-              <><span className="submit-arrow">▶</span>{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
+              <><Icon name="play" size={13} className="submit-arrow" />{hasResults ? "Run" : "Run Query"}<kbd>⌘↵</kbd></>
             )}
           </button>
         </div>

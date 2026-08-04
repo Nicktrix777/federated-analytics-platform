@@ -1,348 +1,242 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef } from "react";
 import ReactECharts from "echarts-for-react";
+import {
+  classifyColumns,
+  recommendChart,
+  prepareChart,
+  buildChartOption,
+  toNumber,
+  formatMetricValue,
+  MAX_SERIES,
+  type ChartForm,
+} from "../lib/chartTheme";
+import { humanizeColumn, formatCompact, formatFull } from "../lib/format";
+import { useTheme } from "../theme";
+import { Icon, type IconName } from "./ui/Icon";
 
 interface ResultsChartProps {
   columns: string[];
   rows: unknown[][];
 }
 
-type ChartType = "bar" | "line" | "pie" | "auto";
+type Selection = ChartForm | "auto";
+
+const TYPE_ICONS: Record<ChartForm, IconName> = {
+  bar: "chart-bar",
+  line: "chart-line",
+  area: "chart-area",
+  pie: "chart-pie",
+};
 
 /**
- * Smart chart visualization with:
- * - Robust numeric detection (handles stringified numbers from Trino NUMERIC/DECIMAL)
- * - Multi-series bar charts for multi-metric queries
- * - Better label column selection (prefers categorical columns)
- * - Manual chart type override
- * - Graceful handling of edge cases (single row, booleans, all-text data)
+ * Query-result visualisation.
+ *
+ * The charting rules — column roles, unit detection, sorting, top-N folding,
+ * marks and chrome — all live in lib/chartTheme so this view and dashboard
+ * tiles render identically. What's local here is the type switcher, the
+ * caption that says what's actually plotted, and PNG export.
+ *
+ * On Auto the recommender may decide the data has no chart worth drawing (one
+ * aggregate row, or a metric identical across every category). Rather than
+ * emit chart-shaped furniture we show the finding as a stat — the reader can
+ * still force any chart type from the toolbar.
  */
 const ResultsChart: React.FC<ResultsChartProps> = ({ columns, rows }) => {
-  const [userChartType, setUserChartType] = useState<ChartType>("auto");
+  const [selection, setSelection] = useState<Selection>("auto");
+  const { theme } = useTheme();
+  const chartRef = useRef<ReactECharts>(null);
 
-  const { chartOption, autoType, hasData } = useMemo(() => {
-    if (rows.length === 0 || columns.length === 0) {
-      return { chartOption: null, autoType: "bar" as ChartType, hasData: false };
+  const view = useMemo(() => {
+    const cls = classifyColumns(columns, rows);
+    const rec = recommendChart(columns, rows, cls);
+
+    // Auto deferred to a non-chart form — show the stat instead.
+    if (selection === "auto" && (rec.form === "stat" || rec.form === "table")) {
+      return { kind: rec.form, reason: rec.reason, cls } as const;
     }
 
-    // ── Column Classification ──────────────────────────────────
-    // Coerce a value to number, handling Trino's stringified NUMERIC/DECIMAL
-    const toNumber = (v: unknown): number | null => {
-      if (v === null || v === undefined || v === "") return null;
-      if (typeof v === "number") return isNaN(v) ? null : v;
-      if (typeof v === "boolean") return v ? 1 : 0;
-      if (typeof v === "string") {
-        const cleaned = v.replace(/,/g, "").trim();
-        const n = parseFloat(cleaned);
-        return isNaN(n) ? null : n;
-      }
-      return null;
-    };
-
-    const isNumericColumn = (colIdx: number): boolean => {
-      const vals = rows.map((r) => r[colIdx]).filter((v) => v !== null && v !== undefined && v !== "");
-      if (vals.length === 0) return false;
-      const numericCount = vals.filter((v) => toNumber(v) !== null).length;
-      return numericCount / vals.length >= 0.8; // 80%+ numeric values = numeric column
-    };
-
-    const isBooleanColumn = (colIdx: number): boolean => {
-      const vals = rows.map((r) => r[colIdx]).filter((v) => v !== null && v !== undefined && v !== "");
-      if (vals.length === 0) return false;
-      return vals.every((v) => typeof v === "boolean" || v === "true" || v === "false");
-    };
-
-    const isTimeColumn = (colIdx: number): boolean => {
-      const name = columns[colIdx]?.toLowerCase() || "";
-      return /date|year|month|week|time|day|quarter|period/.test(name);
-    };
-
-    const isCategoricalLabel = (colIdx: number): boolean => {
-      if (isNumericColumn(colIdx) || isBooleanColumn(colIdx)) return false;
-      return true;
-    };
-
-    // Classify all columns
-    const numericCols: number[] = [];
-    const categoricalCols: number[] = [];
-
-    for (let i = 0; i < columns.length; i++) {
-      if (isBooleanColumn(i)) continue; // Skip booleans for charting
-      if (isNumericColumn(i)) numericCols.push(i);
-      else if (isCategoricalLabel(i)) categoricalCols.push(i);
-    }
-
-    if (numericCols.length === 0) {
-      return { chartOption: null, autoType: "bar" as ChartType, hasData: false };
-    }
-
-    // Pick best label column: prefer categorical columns with meaningful names
-    const labelPreferenceKeywords = ["name", "department", "category", "region", "title", "label", "type", "group", "status", "project", "period", "quarter"];
-    // Only use categoricalCols for labeling — never a numeric col
-    let labelColIdx: number | null = categoricalCols[0] ?? null;
-    for (const keyword of labelPreferenceKeywords) {
-      const found = categoricalCols.find((i) => columns[i]?.toLowerCase().includes(keyword));
-      if (found !== undefined) { labelColIdx = found; break; }
-    }
-
-    // Time series detection
-    const hasTimeAxis = categoricalCols.some((i) => isTimeColumn(i));
-    const firstNumIdx = numericCols[0];
-
-    // Auto-detect chart type
-    let autoType: ChartType = "bar";
-    const total = rows.reduce((sum, r) => sum + (toNumber(r[firstNumIdx]) ?? 0), 0);
-    const isPieable =
-      rows.length <= 10 &&
-      rows.length >= 2 &&
-      total > 0 &&
-      rows.every((r) => (toNumber(r[firstNumIdx]) ?? 0) >= 0) &&
-      numericCols.length === 1 &&
-      labelColIdx !== null; // Need a real categorical label for pie
-
-    if (hasTimeAxis) autoType = "line";
-    else if (isPieable) autoType = "pie";
-    else autoType = "bar";
-
-    // Base colors
-    const baseColors = [
-      "#2563eb", "#7c3aed", "#0891b2", "#059669",
-      "#d97706", "#dc2626", "#db2777", "#65a30d",
-    ];
-
-    const effectiveType = userChartType === "auto" ? autoType : userChartType;
-
-    // For pie, only use categorical labels. For bar/line, use categorical if available or row index.
-    const labels = rows.map((r, i) =>
-      labelColIdx !== null ? String(r[labelColIdx] ?? "") : `Row ${i + 1}`
-    );
-
-    // ── Pie Chart ─────────────────────────────────────────────
-    if (effectiveType === "pie") {
-      // If we don't have a categorical column but user forced pie, use row index labels
-      const pieLabels = labelColIdx !== null
-        ? rows.map((r) => String(r[labelColIdx!] ?? ""))
-        : rows.map((_, i) => `Item ${i + 1}`);
-      const values = rows.map((r) => toNumber(r[firstNumIdx]) ?? 0);
+    const form: ChartForm =
+      selection === "auto"
+        ? (rec.form as ChartForm)
+        : selection;
+    const prep = prepareChart(columns, rows, cls, form, { labelChars: 22 });
+    if (!prep.hasData) {
       return {
-        autoType,
-        hasData: true,
-        chartOption: {
-          backgroundColor: "transparent",
-          tooltip: {
-            trigger: "item",
-            formatter: "{b}: {c} ({d}%)",
-            backgroundColor: "rgba(15,23,42,0.95)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#1e293b" },
-          },
-          legend: {
-            orient: "vertical",
-            right: "5%",
-            top: "middle",
-            textStyle: { color: "#64748b", fontSize: 11 },
-          },
-          series: [{
-            type: "pie",
-            radius: ["38%", "68%"],
-            center: ["42%", "50%"],
-            data: pieLabels.map((label, i) => ({ name: label, value: values[i] })),
-            emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(0,0,0,0.2)" } },
-            itemStyle: { borderRadius: 3, borderColor: "#f8fafc", borderWidth: 2 },
-            label: { color: "#475569", fontSize: 11 },
-            color: baseColors,
-          }],
-        },
+        kind: "table" as const,
+        reason: "No numeric column to plot — the table below has the full result.",
+        cls,
       };
     }
-
-    // ── Line Chart ────────────────────────────────────────────
-    if (effectiveType === "line") {
-      const series = numericCols.slice(0, 4).map((colIdx, si) => ({
-        name: columns[colIdx],
-        type: "line",
-        data: rows.map((r) => toNumber(r[colIdx])),
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 5,
-        lineStyle: { color: baseColors[si % baseColors.length], width: 2.5 },
-        itemStyle: { color: baseColors[si % baseColors.length] },
-        areaStyle: si === 0 ? {
-          color: {
-            type: "linear", x: 0, y: 0, x2: 0, y2: 1,
-            colorStops: [
-              { offset: 0, color: "rgba(37,99,235,0.15)" },
-              { offset: 1, color: "rgba(37,99,235,0.01)" },
-            ],
-          },
-        } : undefined,
-      }));
-
-      return {
-        autoType,
-        hasData: true,
-        chartOption: {
-          backgroundColor: "transparent",
-          tooltip: {
-            trigger: "axis",
-            backgroundColor: "rgba(15,23,42,0.92)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#e2e8f0", fontSize: 12 },
-          },
-          legend: numericCols.length > 1 ? {
-            textStyle: { color: "#64748b", fontSize: 11 },
-            top: 0,
-          } : undefined,
-          grid: { left: "3%", right: "4%", bottom: "15%", top: numericCols.length > 1 ? "15%" : "8%", containLabel: true },
-          xAxis: {
-            type: "category",
-            data: labels,
-            axisLabel: { color: "#94a3b8", rotate: rows.length > 12 ? 45 : 0, fontSize: 11 },
-            axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
-          },
-          yAxis: {
-            type: "value",
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
-            splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
-          },
-          series,
-        },
-      };
-    }
-
-    // ── Bar Chart (default — supports multi-series) ────────────
-    const isHorizontal = rows.length > 8 || numericCols.length === 1;
-
-    const series = numericCols.slice(0, 4).map((colIdx, si) => ({
-      name: columns[colIdx],
-      type: "bar",
-      data: rows.map((r, ri) => ({
-        value: toNumber(r[colIdx]),
-        itemStyle: {
-          color: numericCols.length > 1
-            ? baseColors[si % baseColors.length]
-            : baseColors[ri % baseColors.length],
-          borderRadius: isHorizontal ? [0, 3, 3, 0] : [3, 3, 0, 0],
-        },
-      })),
-      label: numericCols.length === 1 ? {
-        show: true,
-        position: isHorizontal ? "right" : "top",
-        color: "#64748b",
-        fontSize: 10,
-        formatter: (p: { value: number | null }) =>
-          p.value !== null && typeof p.value === "number"
-            ? (Number.isInteger(p.value) ? p.value.toLocaleString() : p.value.toFixed(2))
-            : "",
-      } : undefined,
-    }));
-
-    if (isHorizontal) {
-      return {
-        autoType,
-        hasData: true,
-        chartOption: {
-          backgroundColor: "transparent",
-          tooltip: {
-            trigger: "axis",
-            axisPointer: { type: "shadow" },
-            backgroundColor: "rgba(15,23,42,0.92)",
-            borderColor: "rgba(148,163,184,0.2)",
-            textStyle: { color: "#e2e8f0", fontSize: 12 },
-          },
-          legend: numericCols.length > 1 ? { textStyle: { color: "#64748b", fontSize: 11 } } : undefined,
-          grid: { left: "3%", right: numericCols.length === 1 ? "12%" : "5%", bottom: "5%", top: numericCols.length > 1 ? "12%" : "5%", containLabel: true },
-          xAxis: {
-            type: "value",
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
-            splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
-          },
-          yAxis: {
-            type: "category",
-            data: labels,
-            axisLabel: {
-              color: "#64748b",
-              fontSize: 11,
-              formatter: (val: string) => val.length > 22 ? val.slice(0, 22) + "…" : val,
-            },
-            axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
-          },
-          series,
-        },
-      };
-    }
-
-    // Vertical bar
     return {
-      autoType,
-      hasData: true,
-      chartOption: {
-        backgroundColor: "transparent",
-        tooltip: {
-          trigger: "axis",
-          axisPointer: { type: "shadow" },
-          backgroundColor: "rgba(15,23,42,0.92)",
-          borderColor: "rgba(148,163,184,0.2)",
-          textStyle: { color: "#e2e8f0", fontSize: 12 },
-        },
-        legend: numericCols.length > 1 ? { textStyle: { color: "#64748b", fontSize: 11 } } : undefined,
-        grid: { left: "3%", right: "4%", bottom: "15%", top: numericCols.length > 1 ? "15%" : "5%", containLabel: true },
-        xAxis: {
-          type: "category",
-          data: labels,
-          axisLabel: { color: "#94a3b8", rotate: rows.length > 6 ? 35 : 0, fontSize: 11 },
-          axisLine: { lineStyle: { color: "rgba(148,163,184,0.2)" } },
-        },
-        yAxis: {
-          type: "value",
-          axisLabel: { color: "#94a3b8", fontSize: 11 },
-          splitLine: { lineStyle: { color: "rgba(148,163,184,0.12)" } },
-        },
-        series,
-      },
+      kind: "chart" as const,
+      form,
+      prep,
+      option: buildChartOption(form, prep, { density: "comfortable", themeHint: theme }),
+      autoForm: rec.form,
+      cls,
     };
-  }, [columns, rows, userChartType]);
+    // `theme` is a real dependency: option colours come from CSS tokens.
+  }, [columns, rows, selection, theme]);
 
-  if (!hasData || !chartOption) {
+  const handleDownload = () => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (!instance) return;
+    const url = instance.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "transparent" });
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "chart.png";
+    a.click();
+  };
+
+  const typeSwitcher = (
+    <div className="chart-toolbar">
+      <div className="chart-type-controls" role="group" aria-label="Chart type">
+        <button
+          className={`chart-type-btn ${selection === "auto" ? "chart-type-btn--active" : ""}`}
+          onClick={() => setSelection("auto")}
+          title="Let the data pick the right form"
+        >
+          Auto
+        </button>
+        {(["bar", "line", "area", "pie"] as const).map((t) => (
+          <button
+            key={t}
+            className={`chart-type-btn chart-type-btn--icon ${
+              selection === t ? "chart-type-btn--active" : ""
+            }`}
+            onClick={() => setSelection(t)}
+            title={`Switch to ${t} chart`}
+            aria-label={`${t} chart`}
+            aria-pressed={selection === t}
+          >
+            <Icon name={TYPE_ICONS[t]} size={14} />
+          </button>
+        ))}
+      </div>
+      {view.kind === "chart" && (
+        <button
+          className="chart-type-btn chart-type-btn--icon"
+          onClick={handleDownload}
+          title="Download chart as PNG"
+          aria-label="Download chart as PNG"
+        >
+          <Icon name="download" size={14} />
+        </button>
+      )}
+    </div>
+  );
+
+  // ── Non-chart forms ─────────────────────────────────────────
+  if (view.kind === "stat" || view.kind === "table") {
+    const cls = view.cls;
+    const metricIdx = cls.hasData ? cls.firstNumIdx : 0;
+    const values = rows
+      .map((r) => toNumber(r[metricIdx]))
+      .filter((v): v is number => v !== null);
+    const headline = values.length > 0 ? values[0] : null;
+    const metricName = cls.hasData ? humanizeColumn(columns[metricIdx]) : "";
+
     return (
-      <div className="card">
-        <div className="empty-state">
-          <span className="empty-icon">📉</span>
-          <span>No numeric data to visualize</span>
+      <div className="card chart-card">
+        <div className="card-header">
+          <div className="card-title">
+            <span className="section-title">Visualization</span>
+            <span className="badge badge--chart">
+              {view.kind === "stat" ? "Auto · Stat" : "Auto · Table"}
+            </span>
+          </div>
+          {typeSwitcher}
+        </div>
+        <div className="card-body">
+          {view.kind === "stat" && headline !== null ? (
+            <div className="stat-callout">
+              <div className="stat-callout-value" title={formatFull(headline)}>
+                {formatCompact(headline)}
+              </div>
+              {metricName && <div className="stat-callout-label">{metricName}</div>}
+              {rows.length > 1 && (
+                <div className="stat-callout-sub">
+                  across {rows.length} {(
+                    cls.labelColIdx !== null
+                      ? humanizeColumn(columns[cls.labelColIdx]).toLowerCase()
+                      : "row"
+                  )} values
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <Icon name="chart-area-off" size={22} className="empty-state-icon" />
+              <span>{view.reason}</span>
+            </div>
+          )}
+          <p className="chart-caption">{view.reason}</p>
         </div>
       </div>
     );
   }
 
-  const chartTypeLabel =
-    (userChartType !== "auto" ? userChartType : autoType).charAt(0).toUpperCase() +
-    (userChartType !== "auto" ? userChartType : autoType).slice(1);
+  const { prep, option, form, autoForm } = view;
+  if (!option) return null;
+
+  // Caption: state plainly what is drawn, including anything the chart had to
+  // leave out. A silently truncated chart reads as the whole picture.
+  const captionParts: string[] = [];
+  const metric = prep.series.map((s) => s.name).join(", ");
+  captionParts.push(
+    prep.labelName ? `${metric} by ${prep.labelName.toLowerCase()}` : metric
+  );
+  if (prep.unit !== "count") captionParts.push(`measured in ${prep.unit}`);
+  if (prep.sorted) captionParts.push("ranked high to low");
+  if (prep.foldedCount > 0) {
+    captionParts.push(
+      `top ${prep.labels.length - 1} of ${prep.totalCategories}, remainder grouped as Other`
+    );
+  }
+  if (prep.droppedSeries.length > 0) {
+    captionParts.push(
+      `${prep.droppedSeries.map(humanizeColumn).join(", ")} not plotted (max ${MAX_SERIES} series)`
+    );
+  }
+  if (prep.scaleDropped.length > 0) {
+    captionParts.push(
+      `${prep.scaleDropped
+        .map(humanizeColumn)
+        .join(", ")} left out — a different order of magnitude, so it needs its own chart`
+    );
+  }
+  const range = prep.series[0]?.values.filter((v): v is number => v !== null) ?? [];
+  if (range.length > 1) {
+    captionParts.push(
+      `range ${formatMetricValue(Math.min(...range), prep.unit, true)}–${formatMetricValue(
+        Math.max(...range),
+        prep.unit,
+        true
+      )}`
+    );
+  }
 
   return (
     <div className="card chart-card">
       <div className="card-header">
         <div className="card-title">
           <span className="section-title">Visualization</span>
-          <span className="badge badge--chart">{chartTypeLabel}</span>
+          <span className="badge badge--chart">
+            {selection === "auto" ? `Auto · ${autoForm}` : form}
+          </span>
         </div>
-        <div className="chart-type-controls">
-          {(["auto", "bar", "line", "pie"] as ChartType[]).map((t) => (
-            <button
-              key={t}
-              className={`chart-type-btn ${userChartType === t ? "chart-type-btn--active" : ""}`}
-              onClick={() => setUserChartType(t)}
-              title={t === "auto" ? "Auto-detect best chart type" : `Switch to ${t} chart`}
-            >
-              {t === "auto" ? "Auto" : t === "bar" ? "Bar" : t === "line" ? "Line" : "Pie"}
-            </button>
-          ))}
-        </div>
+        {typeSwitcher}
       </div>
       <div className="card-body">
         <ReactECharts
-          option={chartOption}
-          style={{ height: "320px", width: "100%" }}
+          ref={chartRef}
+          key={`${form}-${theme}`}
+          option={option}
+          notMerge
+          style={{ height: "340px", width: "100%" }}
           opts={{ renderer: "svg" }}
         />
+        <p className="chart-caption">{captionParts.join(" · ")}</p>
       </div>
     </div>
   );

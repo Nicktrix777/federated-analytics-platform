@@ -1,0 +1,10 @@
+# Dev-mode image: live-rebuilds and restarts on source changes via air.
+# Source is bind-mounted at runtime by docker-compose.dev.yml.
+FROM golang:1.22-alpine
+
+RUN apk add --no-cache git ca-certificates curl && \
+    go install github.com/air-verse/air@v1.52.3
+
+WORKDIR /app
+
+CMD ["air", "-c", ".air.toml"]

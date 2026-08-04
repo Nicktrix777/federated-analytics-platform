@@ -1,0 +1,15 @@
+# Dev-mode image: runs the Vite dev server with HMR instead of the Nginx
+# static build. Source is bind-mounted at runtime by docker-compose.dev.yml;
+# node_modules is installed here and kept via an anonymous volume so the
+# container's own (Linux/musl-compatible) install is never shadowed by
+# whatever is in the host's node_modules.
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--", "--host"]

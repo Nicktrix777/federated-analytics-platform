@@ -1,260 +1,232 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  NavLink,
+  useLocation,
+} from "react-router-dom";
 import Header from "./components/Header";
 import QueryInput, { QueryInputHandle } from "./components/QueryInput";
-import QueryPlanView from "./components/QueryPlan";
-import ResultsTable from "./components/ResultsTable";
-import ResultsChart from "./components/ResultsChart";
 import LeftSidebar from "./components/LeftSidebar";
 import FileUpload from "./components/FileUpload";
+import Transcript from "./components/Transcript";
 import { useQuery } from "./hooks/useQuery";
 import { api } from "./api/client";
-import type { DatasetMeta, QueryMode } from "./types";
+import type { DatasetMeta, QueryMode, ConversationSummary } from "./types";
+import { ToastProvider } from "./components/ui";
+import { Button } from "./components/ui";
+import { Icon, type IconName } from "./components/ui/Icon";
+import { ThemeProvider } from "./theme";
+
+// New pages
+import DashboardsListPage from "./pages/DashboardsListPage";
+import DashboardBuilderPage from "./pages/DashboardBuilderPage";
+import ReportsListPage from "./pages/ReportsListPage";
+import ReportDetailPage from "./pages/ReportDetailPage";
+import DataSourcesPage from "./pages/DataSourcesPage";
+import LLMSettingsPage from "./pages/LLMSettingsPage";
+
 import "./App.css";
 
-const App: React.FC = () => {
-  const [aiEnabled, setAiEnabled] = useState(true);
+// ── Navigation bar with active link styling ───────────────────
+const NAV_ITEMS: { to: string; label: string; icon: IconName; end?: boolean }[] = [
+  { to: "/", label: "Query", icon: "search", end: true },
+  { to: "/dashboards", label: "Dashboards", icon: "dashboard" },
+  { to: "/reports", label: "Reports", icon: "report" },
+  { to: "/datasources", label: "Data Sources", icon: "database" },
+  { to: "/settings", label: "Settings", icon: "settings" },
+];
+
+function NavBar() {
+  return (
+    <nav className="top-nav">
+      {NAV_ITEMS.map(({ to, label, icon, end }) => (
+        <NavLink
+          key={to}
+          to={to}
+          end={end}
+          className={({ isActive }: { isActive: boolean }) =>
+            `top-nav-link ${isActive ? "active" : ""}`
+          }
+        >
+          <Icon name={icon} size={15} />
+          <span>{label}</span>
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
+// ── Query / Home page ─────────────────────────────────────────
+function QueryPage() {
+  const [aiEnabled] = useState(true);
   const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [showUpload, setShowUpload] = useState(false);
 
   const queryInputRef = useRef<QueryInputHandle>(null);
 
-  const { status, result, error, history, executeQuery, loadHistory, reset } =
-    useQuery();
+  const {
+    status,
+    turns,
+    history,
+    executeQuery,
+    loadHistory,
+    newConversation,
+    loadConversation,
+  } = useQuery();
 
   const refreshDatasets = useCallback(async () => {
     try {
-      const data = await api.getDatasets();
-      setDatasets(data || []);
+      setDatasets((await api.getDatasets()) || []);
+    } catch {
+      // non-critical
+    }
+  }, []);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations((await api.getConversations(30)) || []);
     } catch {
       // non-critical
     }
   }, []);
 
   useEffect(() => {
-    const init = async () => {
-      await Promise.all([refreshDatasets(), loadHistory()]);
-    };
-    init();
+    void Promise.all([refreshDatasets(), loadHistory(), refreshConversations()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleQuery = (question: string, mode: QueryMode) => {
-    const effectiveMode = mode === "ai" && !aiEnabled ? "sql" : mode;
+  // Run a query, then refresh the chat list so a new thread / title appears.
+  const handleQuery = useCallback(
+    async (question: string, mode: QueryMode) => {
+      await executeQuery(question, mode);
+      refreshConversations();
+    },
+    [executeQuery, refreshConversations]
+  );
+
+  const handleNewChat = useCallback(() => {
+    newConversation();
+    queryInputRef.current?.setQuery("", aiEnabled ? "ai" : "sql");
+  }, [newConversation, aiEnabled]);
+
+  const handleChatSelect = useCallback(
+    (id: string) => {
+      void loadConversation(id);
+    },
+    [loadConversation]
+  );
+
+  const handleUploadSuccess = useCallback(async () => {
     setShowUpload(false);
-    executeQuery(question, effectiveMode);
-  };
+    await refreshDatasets();
+  }, [refreshDatasets]);
 
-  const handleHistorySelect = (question: string, mode: string) => {
-    setShowUpload(false);
-    executeQuery(question, (mode as QueryMode) || "sql");
-  };
-
-  const handleNewQuery = () => {
-    reset();
-    setShowUpload(false);
-  };
-
-  // Schema panel: click a table → run SELECT * query in SQL mode
-  const handleQueryTable = (trinoPath: string) => {
-    const sql = `SELECT * FROM ${trinoPath} LIMIT 10`;
-    queryInputRef.current?.setQuery(sql, "sql");
-    executeQuery(sql, "sql");
-    setShowUpload(false);
-  };
-
-  // Schema panel: click a column → insert column name at cursor
-  const handleInsertColumn = (_trinoPath: string, columnName: string) => {
-    queryInputRef.current?.insertText(columnName);
-  };
-
-  const hasResults = status === "success" && result;
+  const hasTurns = turns.length > 0;
 
   return (
-    <div className="app">
-      <Header
-        aiEnabled={aiEnabled}
-        onToggleAI={setAiEnabled}
+    <div className="app-layout">
+      <LeftSidebar
         datasets={datasets}
-        onNewQuery={handleNewQuery}
-        onToggleUpload={() => setShowUpload((v) => !v)}
-        showUpload={showUpload}
+        history={history}
+        conversations={conversations}
+        onHistorySelect={(question, mode) => handleQuery(question, mode as QueryMode)}
+        onChatSelect={handleChatSelect}
+        onNewChat={handleNewChat}
+        onQueryTable={(trinoPath) => {
+          queryInputRef.current?.setQuery(`SELECT * FROM ${trinoPath} LIMIT 10`, "sql");
+        }}
+        onInsertColumn={(_trinoPath, col) => {
+          queryInputRef.current?.insertText(`${col}`);
+        }}
       />
 
-      <div className="app-layout">
-        {/* Left: Schema + History Sidebar */}
-        <LeftSidebar
-          datasets={datasets}
-          history={history}
-          onHistorySelect={handleHistorySelect}
-          onQueryTable={handleQueryTable}
-          onInsertColumn={handleInsertColumn}
-        />
-
-        {/* Main Content */}
-        <main className="main-content">
-          {/* Upload Panel (collapsible) */}
-          {showUpload && (
-            <div className="upload-panel">
-              <div className="upload-panel-header">
-                <span className="upload-panel-title">Upload Data</span>
-                <button
-                  className="upload-panel-close"
-                  onClick={() => setShowUpload(false)}
-                  aria-label="Close upload panel"
-                >
-                  ✕
-                </button>
+      <main className="main-content main-content--chat">
+        {showUpload ? (
+          <div className="upload-container">
+            <div className="upload-header">
+              <h2>Upload Dataset</h2>
+              <Button variant="ghost" onClick={() => setShowUpload(false)}>
+                <Icon name="close" size={14} /> Close
+              </Button>
+            </div>
+            <FileUpload onUploadSuccess={handleUploadSuccess} />
+          </div>
+        ) : (
+          <>
+            {hasTurns ? (
+              <Transcript
+                turns={turns}
+                datasets={datasets}
+                onClarify={(option) => handleQuery(option, "ai")}
+                onFollowUp={(question) => handleQuery(question, "ai")}
+              />
+            ) : (
+              <div className="chat-welcome">
+                <div className="chat-welcome-mark">
+                  <Icon name="sparkles" size={26} />
+                </div>
+                <h2>Ask your data anything</h2>
+                <p>
+                  Natural-language questions across every connected source.
+                  Follow up to refine — the thread remembers.
+                </p>
               </div>
-              <FileUpload
-                onUploadSuccess={async (res) => {
-                  await refreshDatasets();
-                  setShowUpload(false);
-                  executeQuery(`SELECT * FROM ${res.trino_path} LIMIT 10`, "sql");
-                }}
+            )}
+
+            <div className="composer-dock">
+              <QueryInput
+                ref={queryInputRef}
+                onSubmit={handleQuery}
+                status={status}
+                aiEnabled={aiEnabled}
+                hasResults={hasTurns}
+                onNewQuery={handleNewChat}
               />
             </div>
-          )}
-
-          <QueryInput
-            ref={queryInputRef}
-            onSubmit={handleQuery}
-            status={status}
-            aiEnabled={aiEnabled}
-            hasResults={!!hasResults}
-            onNewQuery={handleNewQuery}
-          />
-
-          {/* Error */}
-          {status === "error" && error && (
-            <div className="error-card">
-              <div className="error-icon">⚠</div>
-              <div className="error-content">
-                <div className="error-title">Query Failed</div>
-                <div className="error-message">{error}</div>
-              </div>
-              <button className="error-dismiss" onClick={handleNewQuery}>✕</button>
-            </div>
-          )}
-
-          {/* Loading */}
-          {status === "loading" && (
-            <div className="loading-state">
-              <div className="loading-pulse">
-                <div className="loading-bar" style={{ width: "60%" }} />
-                <div className="loading-bar" style={{ width: "40%" }} />
-                <div className="loading-bar" style={{ width: "75%" }} />
-              </div>
-              <p className="loading-label">
-                {aiEnabled ? "AI generating query plan…" : "Executing federated query…"}
-              </p>
-            </div>
-          )}
-
-          {/* Results */}
-          {hasResults && (
-            <div className="results-section">
-              {result.plan && (
-                <QueryPlanView
-                  plan={result.plan}
-                  executionTimeMs={result.execution_time_ms}
-                  rowCount={result.row_count}
-                  mode={result.mode}
-                />
-              )}
-
-              {result.columns.length > 0 && (
-                <div className="results-grid">
-                  <ResultsTable
-                    columns={result.columns}
-                    rows={result.rows}
-                    rowCount={result.row_count}
-                  />
-                  {result.columns.length >= 2 && result.rows.length > 0 && (
-                    <ResultsChart columns={result.columns} rows={result.rows} />
-                  )}
-                </div>
-              )}
-
-              {result.columns.length === 0 && (
-                <div className="card">
-                  <div className="empty-state">
-                    <span>Query executed — no rows returned</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Welcome */}
-          {status === "idle" && (
-            <div className="welcome-section">
-              <div className="welcome-hero">
-                <div className="welcome-icon-ring">
-                  <span className="welcome-monogram">F</span>
-                </div>
-                <h2>Federated Query Intelligence</h2>
-                <p>
-                  Ask a question in plain English or write SQL to query across
-                  all connected data sources simultaneously.
-                </p>
-                <div className="welcome-actions">
-                  <button
-                    className="welcome-action-btn welcome-action-btn--primary"
-                    onClick={() => {
-                      const ta = document.getElementById("query-textarea") as HTMLTextAreaElement;
-                      ta?.focus();
-                    }}
-                  >
-                    Start querying
-                  </button>
-                  <button
-                    className="welcome-action-btn"
-                    onClick={() => setShowUpload(true)}
-                  >
-                    Upload data
-                  </button>
-                </div>
-              </div>
-
-              <div className="architecture-callout">
-                <div className="arch-label">Architecture</div>
-                <div className="arch-flow">
-                  <div className="arch-node">
-                    <span className="arch-node-icon">⬡</span>
-                    <span>Frontend</span>
-                  </div>
-                  <span className="arch-arrow">→</span>
-                  <div className="arch-node">
-                    <span className="arch-node-icon">⚙</span>
-                    <span>Core API</span>
-                  </div>
-                  <span className="arch-arrow">→</span>
-                  <div className="arch-node">
-                    <span className="arch-node-icon">◎</span>
-                    <span>AI Engine</span>
-                  </div>
-                  <span className="arch-arrow">→</span>
-                  <div className="arch-node">
-                    <span className="arch-node-icon">⟁</span>
-                    <span>Trino</span>
-                  </div>
-                  <span className="arch-arrow">→</span>
-                  <div className="arch-sources">
-                    <div className="arch-node">
-                      <span className="arch-node-icon">🐘</span>
-                      <span>PostgreSQL</span>
-                    </div>
-                    <div className="arch-node">
-                      <span className="arch-node-icon">🍃</span>
-                      <span>MongoDB</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </main>
-      </div>
+          </>
+        )}
+      </main>
     </div>
+  );
+}
+
+// ── Route Transition Wrapper ──────────────────────────────────
+function AnimatedRoutes() {
+  const location = useLocation();
+  return (
+    <div key={location.pathname} className="page-transition-enter">
+      <Routes location={location}>
+        <Route path="/" element={<QueryPage />} />
+        <Route path="/dashboards" element={<DashboardsListPage />} />
+        <Route path="/dashboards/:id" element={<DashboardBuilderPage />} />
+        <Route path="/reports" element={<ReportsListPage />} />
+        <Route path="/reports/:id" element={<ReportDetailPage />} />
+        <Route path="/datasources" element={<DataSourcesPage />} />
+        <Route path="/settings" element={<LLMSettingsPage />} />
+      </Routes>
+    </div>
+  );
+}
+
+// ── Root App with Router ──────────────────────────────────────
+const App: React.FC = () => {
+  return (
+    <BrowserRouter>
+      <ThemeProvider>
+        <ToastProvider>
+          <div className="app-shell">
+            <Header />
+            <NavBar />
+            <div className="page-content">
+              <AnimatedRoutes />
+            </div>
+          </div>
+        </ToastProvider>
+      </ThemeProvider>
+    </BrowserRouter>
   );
 };
 

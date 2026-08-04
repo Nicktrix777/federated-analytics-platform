@@ -1,0 +1,15 @@
+{
+  "name": "fap-qa",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Headless UX + AI-quality test harness for the federated analytics platform",
+  "scripts": {
+    "test": "playwright test",
+    "test:ux": "playwright test",
+    "report": "playwright show-report artifacts/html-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}

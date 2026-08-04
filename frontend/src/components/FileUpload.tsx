@@ -1,4 +1,5 @@
 import React, { useState, useRef } from "react";
+import { Icon } from "./ui/Icon";
 
 interface UploadResult {
   table_name: string;
@@ -130,7 +131,9 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
             </div>
           ) : (
             <div className="upload-idle">
-              <div className="upload-icon">📊</div>
+              <div className="upload-icon">
+                <Icon name="upload" size={26} />
+              </div>
               <div className="upload-label">Drop your spreadsheet here</div>
               <div className="upload-hint">or click to browse</div>
               <div className="upload-formats">.csv &nbsp;·&nbsp; .xlsx &nbsp;·&nbsp; .xls &nbsp;·&nbsp; max 20MB</div>
@@ -140,7 +143,9 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
       ) : (
         <div className="upload-success">
           <div className="upload-success-header">
-            <span className="upload-success-icon">✅</span>
+            <span className="upload-success-icon">
+              <Icon name="check" size={16} />
+            </span>
             <div>
               <div className="upload-success-title">Upload successful!</div>
               <div className="upload-success-subtitle">
@@ -148,7 +153,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
               </div>
             </div>
             <button className="upload-reset-btn" onClick={reset} title="Upload another file">
-              ✕
+              <Icon name="close" size={14} />
             </button>
           </div>
           <div className="upload-path">
@@ -173,7 +178,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onUploadSuccess }) => {
 
       {error && (
         <div className="upload-error">
-          <span>⚠️</span> {error}
+          <Icon name="alert" size={14} /> {error}
         </div>
       )}
     </div>
