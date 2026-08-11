@@ -22,7 +22,9 @@ class DatasetColumn(BaseModel):
     data_type: str
     description: str = ""
     is_joinable: bool = False
-    sample_values: str = ""
+    # JSON {leaf_path: {pattern, semantic_type}} for nested paths — derived
+    # classifications only, never a real customer value (column_profiles.stats).
+    stats: str = ""
     semantic_type: Optional[str] = None
     pattern: Optional[str] = None
 

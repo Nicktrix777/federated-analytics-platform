@@ -26,6 +26,8 @@ export type IconName =
   | "elasticsearch"
   | "mysql"
   | "trino"
+  | "zoho-books"
+  | "tally"
   // chart types
   | "chart-bar"
   | "chart-line"
@@ -151,6 +153,16 @@ const PATHS: Record<IconName, React.ReactNode> = {
   trino: (
     <>
       <path d="M13.5 2.5 5 13.5h5.5L9.5 21.5 19 10.5h-5.8z" />
+    </>
+  ),
+  "zoho-books": (
+    <>
+      <path d="M7.5 17.5a4 4 0 0 1-.5-7.97A5 5 0 0 1 16.7 8.3 3.8 3.8 0 0 1 16.3 17.5H7.5Z" />
+    </>
+  ),
+  tally: (
+    <>
+      <path d="M6 5v14M10 5v14M14 5v14M18 5v14M4.5 8.5 19.5 15.5" />
     </>
   ),
 
@@ -410,6 +422,10 @@ export function sourceIcon(sourceType: string): IconName {
       return "mysql";
     case "trino":
       return "trino";
+    case "zoho_books":
+      return "zoho-books";
+    case "tally":
+      return "tally";
     default:
       return "database";
   }
@@ -429,6 +445,10 @@ export function sourceBadge(sourceType: string): string {
       return "SQL";
     case "trino":
       return "TRN";
+    case "zoho_books":
+      return "ZOHO";
+    case "tally":
+      return "TLY";
     default:
       return "DB";
   }

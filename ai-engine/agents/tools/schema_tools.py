@@ -173,7 +173,7 @@ async def _async_get_columns(trino_path: str) -> str:
                 "data_type": str(row[1]).upper(),
                 "description": "",
                 "is_joinable": col_name.endswith("_id") or col_name == "id",
-                "sample_values": "",
+                "stats": "",
             }
     except Exception as e:
         logger.warning(f"Trino column fetch failed for {trino_path}: {e}")
@@ -184,7 +184,7 @@ async def _async_get_columns(trino_path: str) -> str:
             meta_cols = await conn.fetch("""
                 SELECT dc.column_name, dc.description, dc.is_joinable,
                        dc.semantic_type,
-                       cp.sample_values, cp.pattern
+                       cp.stats::text AS stats, cp.pattern
                 FROM dataset_columns dc
                 JOIN datasets d ON d.id = dc.dataset_id
                 LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
@@ -195,7 +195,7 @@ async def _async_get_columns(trino_path: str) -> str:
             if col_name in trino_cols:
                 trino_cols[col_name]["description"] = mc["description"] or ""
                 trino_cols[col_name]["is_joinable"] = mc["is_joinable"]
-                trino_cols[col_name]["sample_values"] = mc["sample_values"] or ""
+                trino_cols[col_name]["stats"] = mc["stats"] or ""
                 if mc["semantic_type"]:
                     trino_cols[col_name]["semantic_type"] = mc["semantic_type"]
                 if mc["pattern"]:

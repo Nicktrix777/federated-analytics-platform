@@ -20,13 +20,18 @@ type Config struct {
 	TrinoHost                  string // for schema refresh via Trino REST API
 	TrinoPort                  string
 	CatalogSyncIntervalSeconds int // how often to auto-discover new Trino catalogs/tables
+	// InternalServiceToken authenticates the tally Trino connector plugin's
+	// calls to /internal/tally-tunnel/:id/forward - shared only between
+	// core-api and Trino (see trino/catalog/tally.properties), never seen
+	// by a customer or the public API.
+	InternalServiceToken string
 }
 
 // knownInsecureDefaults are the exact values shipped in .env.example. A deployment
 // still running any of these is only as secure as the public source repo.
 var knownInsecureDefaults = map[string]string{
-	"API_AUTH_TOKEN":          "poc-demo-token-2024",
-	"POSTGRES_META_PASSWORD":  "meta_pass_2024",
+	"API_AUTH_TOKEN":           "poc-demo-token-2024",
+	"POSTGRES_META_PASSWORD":   "meta_pass_2024",
 	"POSTGRES_SOURCE_PASSWORD": "source_pass_2024",
 }
 
@@ -62,6 +67,13 @@ func Load() *Config {
 			"generate one with `openssl rand -base64 32`). Datasource credentials cannot be stored without it.")
 	}
 
+	internalServiceToken := os.Getenv("INTERNAL_SERVICE_TOKEN")
+	if internalServiceToken == "" {
+		log.Fatal("INTERNAL_SERVICE_TOKEN is required (any random string — " +
+			"generate one with `openssl rand -base64 32`). Authenticates the tally Trino connector's " +
+			"calls to the tally-bridge tunnel; shared only with Trino, never with a customer.")
+	}
+
 	dsn := fmt.Sprintf(
 		"host=%s port=%s dbname=%s user=%s password=%s sslmode=disable",
 		pgHost, pgPort, pgDB, pgUser, pgPass,
@@ -89,6 +101,7 @@ func Load() *Config {
 		TrinoHost:                  getEnv("TRINO_HOST", "trino"),
 		TrinoPort:                  getEnv("TRINO_PORT", "8080"),
 		CatalogSyncIntervalSeconds: catalogSyncInterval,
+		InternalServiceToken:       internalServiceToken,
 	}
 }
 

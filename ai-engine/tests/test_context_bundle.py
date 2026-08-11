@@ -1,7 +1,9 @@
 """Unit tests for context_bundle's pure renderers.
 
 These test the deterministic rendering only (no DB/Trino/LLM needed):
-  - the shared column-line hint: real samples > [format: pattern] > nothing
+  - the shared column-line hint: [format: pattern] or nothing — no real
+    customer value is ever rendered (see context_bundle.py's module docstring)
+  - nested leaf paths get their own [format: X] hint from column_profiles.stats
   - the pattern hint appears in BOTH the fast-path system prompt and extra_context
   - render_extra_context returns None for an empty bundle
   - relationships render into both renderers
@@ -22,13 +24,13 @@ from context_bundle import (
 from models import DatasetColumn, DatasetMeta, PlanRequest
 
 
-def _col(name, dtype="VARCHAR", *, samples="", pattern=None, desc="", joinable=False, semantic_type=None):
+def _col(name, dtype="VARCHAR", *, stats="", pattern=None, desc="", joinable=False, semantic_type=None):
     return DatasetColumn(
         column_name=name,
         data_type=dtype,
         description=desc,
         is_joinable=joinable,
-        sample_values=samples,
+        stats=stats,
         pattern=pattern,
         semantic_type=semantic_type,
     )
@@ -51,26 +53,18 @@ def _bundle(columns, relationships=None, examples=None, lookups=None):
     )
 
 
-# ── _column_hint_suffix (the shared new behavior) ────────────────
+# ── _column_hint_suffix (the shared behavior — pattern only, never a literal) ──
 
 
 class TestColumnHintSuffix:
-    def test_real_samples_win_over_pattern(self):
-        col = _col("nationality", samples='{"nationality": ["IND", "GBR"]}', pattern="alpha3_code")
-        samples = {"nationality": ["IND", "GBR"]}
-        # samples present -> render literals, NOT the pattern hint
-        out = _column_hint_suffix(col, samples)
-        assert out == " [e.g. IND, GBR]"
-        assert "format:" not in out
-
-    def test_pattern_hint_when_samples_absent(self):
-        col = _col("nationality", samples="", pattern="alpha3_code")
-        out = _column_hint_suffix(col, {})
+    def test_pattern_hint_when_present(self):
+        col = _col("nationality", pattern="alpha3_code")
+        out = _column_hint_suffix(col)
         assert out == " [format: alpha3_code]"
 
-    def test_nothing_when_neither(self):
-        col = _col("code", samples="", pattern=None)
-        assert _column_hint_suffix(col, {}) == ""
+    def test_nothing_when_no_pattern(self):
+        col = _col("code", pattern=None)
+        assert _column_hint_suffix(col) == ""
 
 
 # ── pattern hint lands in BOTH renderers, once each ──────────────
@@ -87,17 +81,23 @@ class TestPatternHintInRenderers:
         out = render_extra_context(bundle)
         assert "- nationality (varchar): ISO code [format: alpha3_code]" in out
 
-    def test_gated_column_with_pattern_still_gets_shape_hint(self):
-        # A sensitive column: profiler wrote pattern but NULLed sample_values.
-        bundle = _bundle([_col("ssn", samples="", pattern="numeric_code")])
+    def test_column_with_pattern_gets_shape_hint_universally(self):
+        # No sensitivity gating anymore — every column with a detected pattern
+        # gets the format hint, regardless of what kind of data it is.
+        bundle = _bundle([_col("ssn", pattern="numeric_code")])
         assert "[format: numeric_code]" in render_extra_context(bundle)
         assert "[format: numeric_code]" in render_fast_path_system_prompt(bundle)
 
-    def test_samples_suppress_pattern_hint(self):
-        bundle = _bundle([_col("nationality", samples='{"nationality": ["IND"]}', pattern="alpha3_code")])
-        out = render_extra_context(bundle)
-        assert "[e.g. IND]" in out
-        assert "format:" not in out
+    def test_nested_leaf_gets_its_own_format_hint_from_stats(self):
+        # column_profiles.stats carries {leaf_path: {pattern, semantic_type}}
+        # for nested paths — never a literal value.
+        stats = '{"details.nationality": {"pattern": "alpha3_code", "semantic_type": "country_code_alpha3"}}'
+        bundle = _bundle([_col("details", "ROW(nationality VARCHAR)", stats=stats)])
+        out = render_fast_path_system_prompt(bundle)
+        assert "details.nationality" in out
+        assert "[format: country_code_alpha3]" in out
+        # No literal-value suffix (the old removed rendering) anywhere.
+        assert "[e.g." not in out
 
 
 # ── structural guards ────────────────────────────────────────────
@@ -248,47 +248,30 @@ class TestLookupBoundColumns:
         assert _lookup_bound_columns([], []) == set()
 
 
-class TestLookupSampleSuppression:
-    """Lookup-bound columns suppress their inline sample literals in prompts."""
+class TestLookupSuppressesNestedHints:
+    """Lookup-bound columns suppress their nested [format: X] hints too — showing
+    a coded value's shape still invites literal-guessing the lookup subquery
+    is meant to prevent."""
 
-    def test_system_prompt_suppresses_samples_for_bound_column(self):
+    def test_system_prompt_suppresses_nested_hint_for_bound_column(self):
         lookups = [{
             "column_trino_path": 'postgresql.public."drivers"',
-            "column_name": "nationality",
+            "column_name": "details",
             "semantic_type": None,
             "lookup_trino_path": "postgresql.reference.countries",
             "key_column": "code",
             "match_columns": ["name"],
             "description": "",
         }]
-        cols = [_col("nationality", samples='{"nationality": ["IND", "GBR"]}')]
+        stats = '{"details.nationality": {"pattern": "alpha3_code"}}'
+        cols = [_col("details", "ROW(nationality VARCHAR)", stats=stats)]
         bundle = _bundle(cols, lookups=lookups)
         out = render_fast_path_system_prompt(bundle)
-        # The inline samples should be suppressed
-        assert "[e.g. IND, GBR]" not in out
-        # Instead, the column should be marked as LOOKUP-BOUND
-        assert "[LOOKUP-BOUND]" in out
-        # The lookups block should be present
-        assert "Coded-Column Lookups" in out
-
-    def test_extra_context_suppresses_samples_for_bound_column(self):
-        lookups = [{
-            "column_trino_path": 'postgresql.public."drivers"',
-            "column_name": "nationality",
-            "semantic_type": None,
-            "lookup_trino_path": "postgresql.reference.countries",
-            "key_column": "code",
-            "match_columns": ["name"],
-            "description": "",
-        }]
-        cols = [_col("nationality", samples='{"nationality": ["IND", "GBR"]}')]
-        bundle = _bundle(cols, lookups=lookups)
-        out = render_extra_context(bundle)
-        assert "[e.g. IND, GBR]" not in out
+        assert "[format: alpha3_code]" not in out
         assert "[LOOKUP-BOUND]" in out
         assert "Coded-Column Lookups" in out
 
-    def test_unbound_column_still_shows_samples(self):
+    def test_unbound_column_still_shows_nested_hint(self):
         lookups = [{
             "column_trino_path": 'postgresql.public."OTHER"',
             "column_name": "other_col",
@@ -298,11 +281,10 @@ class TestLookupSampleSuppression:
             "match_columns": [],
             "description": "",
         }]
-        cols = [_col("nationality", samples='{"nationality": ["IND", "GBR"]}')]
+        stats = '{"details.nationality": {"pattern": "alpha3_code"}}'
+        cols = [_col("details", "ROW(nationality VARCHAR)", stats=stats)]
         bundle = _bundle(cols, lookups=lookups)
         out = render_fast_path_system_prompt(bundle)
-        # nationality is NOT bound by this lookup, so samples should be visible
-        assert "[e.g. IND, GBR]" in out
+        # details is NOT bound by this lookup, so its nested hint should show
+        assert "[format: alpha3_code]" in out
         assert "[LOOKUP-BOUND]" not in out
-
-

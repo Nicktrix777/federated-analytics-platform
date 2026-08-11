@@ -75,10 +75,8 @@ func (s *MetadataService) GetAllDatasets() ([]models.DatasetMeta, error) {
 
 func (s *MetadataService) getColumns(datasetID int) ([]models.DatasetColumn, error) {
 	rows, err := s.db.Query(`
-		SELECT dc.column_name, dc.data_type, COALESCE(dc.description, ''),
-		       dc.is_joinable, COALESCE(cp.sample_values, '')
+		SELECT dc.column_name, dc.data_type, COALESCE(dc.description, ''), dc.is_joinable
 		FROM dataset_columns dc
-		LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
 		WHERE dc.dataset_id = $1
 		ORDER BY dc.id
 	`, datasetID)
@@ -90,7 +88,7 @@ func (s *MetadataService) getColumns(datasetID int) ([]models.DatasetColumn, err
 	var cols []models.DatasetColumn
 	for rows.Next() {
 		var c models.DatasetColumn
-		if err := rows.Scan(&c.ColumnName, &c.DataType, &c.Description, &c.IsJoinable, &c.SampleValues); err != nil {
+		if err := rows.Scan(&c.ColumnName, &c.DataType, &c.Description, &c.IsJoinable); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 		cols = append(cols, c)

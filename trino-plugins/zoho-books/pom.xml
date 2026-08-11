@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Native Trino connector for Zoho Books. Queries Zoho's REST API live at
+  scan time (no data copied/cached on our side); credentials for each
+  registered customer connection are read directly from postgres-meta's
+  data_sources table and decrypted with the same AES-256-GCM key core-api
+  uses (see AesGcmCrypto.java). Built via trino/Dockerfile only - no local
+  Maven/JDK required, matching this repo's "everything through compose"
+  convention.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.federatedanalytics.trino</groupId>
+  <artifactId>trino-zoho-books</artifactId>
+  <version>1.0.0</version>
+  <packaging>trino-plugin</packaging>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>25</maven.compiler.release>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.trino</groupId>
+      <artifactId>trino-spi</artifactId>
+      <version>483</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Bundled per-plugin, same reasoning as trino-plugins/hello/pom.xml. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.22.1</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-blackbird</artifactId>
+      <version>2.22.1</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+      <version>2.22</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Reads data_sources directly from postgres-meta to resolve each
+         registered Zoho org's credentials at query time - own copy bundled
+         per-plugin, same as every other JDBC-backed Trino connector. -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.13</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.trino</groupId>
+        <artifactId>trino-maven-plugin</artifactId>
+        <version>24</version>
+        <extensions>true</extensions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

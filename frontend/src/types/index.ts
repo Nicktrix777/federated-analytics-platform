@@ -5,7 +5,7 @@
 export interface DataSource {
   id: number;
   name: string;
-  source_type: "postgresql" | "mongodb" | "elasticsearch" | "mysql" | "trino";
+  source_type: "postgresql" | "mongodb" | "elasticsearch" | "mysql" | "trino" | "zoho_books" | "tally";
   host: string;
   port: number;
   database_name: string;
@@ -17,18 +17,29 @@ export interface DataSource {
   last_schema_refresh?: string;
   created_at: string;
   updated_at: string;
+  // tally only — present exactly once, in the response to creating it.
+  bridge_token?: string;
 }
 
 export interface CreateDataSourcePayload {
   name: string;
   source_type: string;
-  host: string;
-  port: number;
-  database_name: string;
+  // Required for the live JDBC/wire-protocol types; not used for
+  // zoho_books/tally (see the OAuth/none fields below instead).
+  host?: string;
+  port?: number;
+  database_name?: string;
   username?: string;
   password?: string;
-  trino_catalog: string;
+  trino_catalog?: string;
   extra_config?: string;
+  // zoho_books only — a one-time Self Client grant code, exchanged for a
+  // refresh token server-side and discarded; never stored as entered.
+  client_id?: string;
+  client_secret?: string;
+  grant_code?: string;
+  organization_id?: string;
+  data_center?: string;
 }
 
 export interface SchemaRefreshResult {
@@ -52,7 +63,6 @@ export interface DatasetColumn {
   data_type: string;
   description: string;
   is_joinable: boolean;
-  sample_values?: string;
 }
 
 export interface DatasetMeta {

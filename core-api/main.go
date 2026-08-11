@@ -68,6 +68,8 @@ func main() {
 	metadataHandler := handlers.NewMetadataHandler(metadataSvc)
 	uploadHandler := handlers.NewUploadHandler(uploadSvc)
 	dataSourceHandler := handlers.NewDataSourceHandler(dataSourceSvc)
+	tallyTunnelRegistry := services.NewTallyTunnelRegistry()
+	tallyTunnelHandler := handlers.NewTallyTunnelHandler(dataSourceSvc, tallyTunnelRegistry, cfg.InternalServiceToken)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardSvc, aiClient, queryClient, cfg.AIEnabled)
 	reportHandler := handlers.NewReportHandler(reportSvc, aiClient, queryClient, cfg.AIEnabled)
 	curationHandler := handlers.NewCurationHandler(curationSvc)
@@ -90,6 +92,17 @@ func main() {
 
 	// Public routes (no auth)
 	r.GET("/api/health", healthHandler.HandleHealth)
+
+	// tally-bridge tunnel — deliberately outside the /api auth group below:
+	// HandleConnect authenticates each caller with its own per-datasource
+	// bridge token (a customer's bridge, not a platform user), and
+	// HandleForward with a separate internal-service token (only Trino
+	// itself calls it) — neither matches the static bearer token /api uses.
+	tunnel := r.Group("/internal/tally-tunnel")
+	{
+		tunnel.GET("/connect", tallyTunnelHandler.HandleConnect)
+		tunnel.POST("/:id/forward", tallyTunnelHandler.HandleForward)
+	}
 
 	// Authenticated routes
 	api := r.Group("/api")
