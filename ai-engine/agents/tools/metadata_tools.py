@@ -43,7 +43,7 @@ async def _async_get_datasets() -> str:
                        dc.description AS column_description,
                        dc.is_joinable,
                        dc.semantic_type,
-                       cp.sample_values,
+                       cp.stats::text AS stats,
                        cp.pattern
                 FROM datasets d
                 LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
@@ -73,7 +73,7 @@ async def _async_get_datasets() -> str:
                     "data_type": row["data_type"],
                     "description": row["column_description"] or "",
                     "is_joinable": row["is_joinable"],
-                    "sample_values": row["sample_values"] or "",
+                    "stats": row["stats"] or "",
                 }
                 if row["semantic_type"]:
                     col["semantic_type"] = row["semantic_type"]

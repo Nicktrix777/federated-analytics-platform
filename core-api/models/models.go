@@ -27,8 +27,8 @@ type QueryRequest struct {
 // ──────────────────────────────────────────────────────────
 
 type ChatMessage struct {
-	Role    string          `json:"role"`              // "user" | "assistant"
-	Kind    string          `json:"kind"`              // "question" | "answer" | "plan" | "clarification"
+	Role    string          `json:"role"` // "user" | "assistant"
+	Kind    string          `json:"kind"` // "question" | "answer" | "plan" | "clarification"
 	Content string          `json:"content"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
@@ -104,11 +104,10 @@ type Clarification struct {
 // ──────────────────────────────────────────────────────────
 
 type DatasetColumn struct {
-	ColumnName   string `json:"column_name"`
-	DataType     string `json:"data_type"`
-	Description  string `json:"description"`
-	IsJoinable   bool   `json:"is_joinable"`
-	SampleValues string `json:"sample_values,omitempty"`
+	ColumnName  string `json:"column_name"`
+	DataType    string `json:"data_type"`
+	Description string `json:"description"`
+	IsJoinable  bool   `json:"is_joinable"`
 }
 
 type DatasetMeta struct {
@@ -125,15 +124,25 @@ type DatasetMeta struct {
 // ──────────────────────────────────────────────────────────
 
 type DataSource struct {
-	ID                int        `json:"id"`
-	Name              string     `json:"name"`
-	SourceType        string     `json:"source_type"`
-	Host              string     `json:"host"`
-	Port              int        `json:"port"`
-	DatabaseName      string     `json:"database_name"`
-	Username          string     `json:"username,omitempty"`
-	ExtraConfig       string     `json:"extra_config,omitempty"` // JSON
-	TrinoCatalog      string     `json:"trino_catalog"`
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	SourceType   string `json:"source_type"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	DatabaseName string `json:"database_name"`
+	Username     string `json:"username,omitempty"`
+	ExtraConfig  string `json:"extra_config,omitempty"` // JSON
+	TrinoCatalog string `json:"trino_catalog"`
+	// TrinoSchema distinguishes multiple data_sources rows that share one
+	// static Trino catalog (zoho_books, tally: one catalog, one schema per
+	// registered customer connection). Empty for source types that still map
+	// one catalog to one data_source (postgresql/mongodb/elasticsearch/mysql).
+	TrinoSchema string `json:"trino_schema,omitempty"`
+	// BridgeToken is set only in Create()'s response for a new tally
+	// datasource — a one-time reveal of the generated bridge token so the
+	// customer can copy it into their tally-bridge config. Never populated
+	// by any read path (GetByID/List never select password_encrypted).
+	BridgeToken       string     `json:"bridge_token,omitempty"`
 	IsActive          bool       `json:"is_active"`
 	SchemaCache       string     `json:"schema_cache,omitempty"` // JSON
 	LastSchemaRefresh *time.Time `json:"last_schema_refresh,omitempty"`
@@ -142,15 +151,31 @@ type DataSource struct {
 }
 
 type CreateDataSourceRequest struct {
-	Name         string `json:"name" binding:"required"`
-	SourceType   string `json:"source_type" binding:"required,oneof=postgresql mongodb elasticsearch mysql trino"`
-	Host         string `json:"host" binding:"required"`
-	Port         int    `json:"port" binding:"required"`
+	Name       string `json:"name" binding:"required"`
+	SourceType string `json:"source_type" binding:"required,oneof=postgresql mongodb elasticsearch mysql trino zoho_books tally"`
+	// Host, Port and TrinoCatalog are required for the live JDBC/wire-protocol
+	// source types but not for zoho_books/tally (API/XML-backed, resolved by
+	// the connector plugin, not by dialing host:port from core-api) — enforced
+	// per-type in DataSourceService.Create, not via a blanket binding tag,
+	// since Gin's binding tags can't express "required only when type=X".
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
 	DatabaseName string `json:"database_name"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
-	TrinoCatalog string `json:"trino_catalog" binding:"required"`
+	TrinoCatalog string `json:"trino_catalog"`
 	ExtraConfig  string `json:"extra_config"`
+
+	// zoho_books only — a one-time Self Client grant code the customer
+	// generates in Zoho's API Console. Create() exchanges it for a refresh
+	// token immediately and discards the code; only the resulting refresh
+	// token is ever stored (encrypted, alongside ClientID/ClientSecret, as
+	// the JSON blob in password_encrypted).
+	ClientID       string `json:"client_id"`
+	ClientSecret   string `json:"client_secret"`
+	GrantCode      string `json:"grant_code"`
+	OrganizationID string `json:"organization_id"`
+	DataCenter     string `json:"data_center"`
 }
 
 type UpdateDataSourceRequest struct {

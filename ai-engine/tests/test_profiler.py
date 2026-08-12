@@ -18,6 +18,7 @@ from profiler import (
     _count_nulls,
     _detect_pattern,
     _keep,
+    _leaf_stats,
     _profile_content_hash,
     _suggest_semantic_type,
     DISTINCT_TRACK_CAP,
@@ -218,6 +219,34 @@ class TestProfileContentHash:
     def test_none_values(self):
         h = _profile_content_hash(None, None, None, None)
         assert isinstance(h, str) and len(h) == 64
+
+
+# ── _leaf_stats (per-leaf derived signal, never a literal value) ─
+
+
+class TestLeafStats:
+    def test_derives_pattern_and_semantic_type_per_leaf(self):
+        payload = {"details.nationality": ["IND", "GBR", "USA"]}
+        out = _leaf_stats(payload, "details")
+        assert out == {
+            "details.nationality": {"pattern": "alpha3_code", "semantic_type": "country_code_alpha3"}
+        }
+        # No literal value anywhere in the output.
+        assert "IND" not in str(out)
+
+    def test_excludes_top_level_own_leaf(self):
+        # The column's own flat leaf is already covered by the dedicated
+        # pattern/suggested_semantic_type columns — not duplicated into stats.
+        payload = {"status": ["ACTIVE", "CLOSED"]}
+        assert _leaf_stats(payload, "status") is None
+
+    def test_none_for_empty_payload(self):
+        assert _leaf_stats(None, "col") is None
+        assert _leaf_stats({}, "col") is None
+
+    def test_none_when_no_leaf_has_a_pattern(self):
+        payload = {"details.notes": ["some free text here", "other text"]}
+        assert _leaf_stats(payload, "details") is None
 
 
 # ── _collect (scalar walk) ────────────────────────────────────────

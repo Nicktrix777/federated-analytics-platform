@@ -138,10 +138,23 @@ services:
   # Federates across Postgres, MongoDB, and Elasticsearch
   # ──────────────────────────────────────────────
   trino:
-    image: trinodb/trino:483
+    build:
+      context: .
+      dockerfile: trino/Dockerfile
     container_name: fap-trino
     ports:
       - "8080:8080"
+    environment:
+      # Read by the zoho_books/tally catalogs (see trino/catalog/*.properties,
+      # substituted via Trino's built-in ${ENV:...} support) - both resolve a
+      # registered customer connection's credentials by reading data_sources
+      # directly from postgres-meta and decrypting with the same key core-api
+      # uses, rather than baking any customer secret into a static file.
+      POSTGRES_META_PASSWORD: ${POSTGRES_META_PASSWORD:-meta_pass_2024}
+      DATASOURCE_ENCRYPTION_KEY: ${DATASOURCE_ENCRYPTION_KEY}
+      # Read by the tally catalog only, to authenticate its calls through
+      # core-api's tally-bridge tunnel (see trino-plugins/tally/).
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/config/config.properties:/etc/trino/config.properties:ro
@@ -152,6 +165,8 @@ services:
     networks:
       - federation-net
     depends_on:
+      postgres-meta:
+        condition: service_healthy
       postgres-source:
         condition: service_healthy
       mongo-source:
@@ -275,6 +290,7 @@ services:
       API_AUTH_TOKEN: ${API_AUTH_TOKEN:-poc-demo-token-2024}
       ALLOW_DEV_DEFAULTS: ${ALLOW_DEV_DEFAULTS:-false}
       DATASOURCE_ENCRYPTION_KEY: ${DATASOURCE_ENCRYPTION_KEY:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
       POSTGRES_META_HOST: postgres-meta
       POSTGRES_META_PORT: 5432
       POSTGRES_META_DB: analytics_meta

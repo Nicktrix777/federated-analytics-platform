@@ -18,10 +18,11 @@ curated join map (+ few-shot examples for the fast path) — and returns a
     deepagents pipeline / dashboard designer / widget-repair prompts (absorbed
     from the old main._build_extra_context).
 
-Both renderers share `schema_render.py` and now emit the SAME new hint in one
-place: a column whose sample values are absent or gated but which carries a
-detected `pattern` renders `[format: <pattern>]` so the model still knows the
-value shape (e.g. an ISO alpha-3 country code) without seeing real literals.
+Both renderers share `schema_render.py` and emit the SAME hint in one place: a
+column with a detected `pattern` renders `[format: <pattern>]` so the model
+still knows the value shape (e.g. an ISO alpha-3 country code). No real
+customer value is ever rendered anywhere in this module — only derived,
+non-literal classifications (column_profiles.pattern/stats).
 
 Nothing here is schema-specific — point the platform at different sources and the
 bundle reshapes itself from live metadata.
@@ -36,12 +37,7 @@ from typing import List, Optional
 from config import settings
 from events import EventEmitter, NullEmitter
 from models import ChatMessage, DatasetColumn, DatasetMeta
-from schema_render import (
-    categorical_values_block,
-    column_sample_suffix,
-    describe_column,
-    parse_samples,
-)
+from schema_render import describe_column, parse_leaf_stats
 from agents.tools.metadata_tools import (
     _async_get_datasets,
     _async_get_patterns,
@@ -217,17 +213,12 @@ async def build_context_bundle(
 
 
 # ── Shared column-line hint ───────────────────────────────────────
-def _column_hint_suffix(col: DatasetColumn, samples: dict) -> str:
-    """Trailing hint for a top-level column line: real sample literals if we
-    have them, else a `[format: <pattern>]` shape hint when the profiler
-    detected a pattern but the values are absent or gated. Empty when neither.
+def _column_hint_suffix(col: DatasetColumn) -> str:
+    """Trailing hint for a top-level column line: a `[format: <pattern>]`
+    shape hint when the profiler detected one, else empty. Never a literal
+    example value — see module docstring.
     """
-    sample_sfx = column_sample_suffix(col.column_name, samples)
-    if sample_sfx:
-        return sample_sfx
-    if col.pattern:
-        return f" [format: {col.pattern}]"
-    return ""
+    return f" [format: {col.pattern}]" if col.pattern else ""
 
 
 # ── Lookup helpers ────────────────────────────────────────────────
@@ -349,11 +340,12 @@ def _render_schema_sections(
         for col in ds.columns:
             # Nested ROW/ARRAY(ROW) columns expand into explicit dotted paths and
             # UNNEST recipes instead of an opaque type blob the model can't navigate.
-            # Sample values (real stored values) are attached to each leaf.
+            # Each leaf gets a [format: X] hint from its derived pattern, never a
+            # real stored value.
             is_bound = (ds.trino_path, col.column_name) in lookup_bound
-            samples = {} if is_bound else parse_samples(col.sample_values)
+            leaf_stats = {} if is_bound else parse_leaf_stats(col.stats)
             type_summary, nested = describe_column(
-                col.column_name, col.data_type, samples, max_leaves=20
+                col.column_name, col.data_type, leaf_stats, max_leaves=20
             )
             line = f"  - {col.column_name} ({type_summary})"
             if col.description:
@@ -361,7 +353,7 @@ def _render_schema_sections(
             if is_bound:
                 line += " [LOOKUP-BOUND]"
             else:
-                line += _column_hint_suffix(col, samples)
+                line += _column_hint_suffix(col)
             if col.is_joinable:
                 line += " [JOIN KEY]"
             col_lines.append(line)
@@ -375,14 +367,6 @@ def _render_schema_sections(
             f"Trino reference: {ds.trino_path}\n"
             f"Columns:\n{cols_str}"
         )
-        # Exclude lookup-bound columns from categorical values block
-        vals_block = categorical_values_block(
-            (c.column_name, c.sample_values)
-            for c in ds.columns
-            if (ds.trino_path, c.column_name) not in lookup_bound
-        )
-        if vals_block:
-            section += f"\n{vals_block}"
         schema_sections.append(section)
 
     return "\n\n".join(schema_sections) if schema_sections else "(no datasets registered)"
@@ -642,26 +626,17 @@ def render_extra_context(bundle: ContextBundle) -> Optional[str]:
         for col in ds.columns[:40]:  # generous cap — a missing column invites the LLM to invent one
             # Deeply-nested ROW/ARRAY(ROW) columns are flattened into explicit
             # dotted paths + UNNEST recipes so the model navigates them correctly
-            # instead of guessing at the opaque type string. Sample values (real
-            # stored values) are attached per leaf so filters use actual literals.
+            # instead of guessing at the opaque type string. Each leaf gets a
+            # [format: X] hint from its derived pattern, never a real value.
             is_bound = (ds.trino_path, col.column_name) in lookup_bound
-            samples = {} if is_bound else parse_samples(col.sample_values)
-            type_summary, nested = describe_column(col.column_name, col.data_type, samples, max_leaves=24)
+            leaf_stats = {} if is_bound else parse_leaf_stats(col.stats)
+            type_summary, nested = describe_column(col.column_name, col.data_type, leaf_stats, max_leaves=24)
             desc = f": {col.description}" if col.description else ""
-            hint = " [LOOKUP-BOUND]" if is_bound else _column_hint_suffix(col, samples)
+            hint = " [LOOKUP-BOUND]" if is_bound else _column_hint_suffix(col)
             schema_lines.append(
                 f"  - {col.column_name} ({type_summary}){desc}{hint}"
             )
             schema_lines.extend(nested)
-        # Truncation-proof list of real values for nested categorical leaves.
-        # Exclude lookup-bound columns — their samples invite literal guessing.
-        vals_block = categorical_values_block(
-            (c.column_name, c.sample_values)
-            for c in ds.columns
-            if (ds.trino_path, c.column_name) not in lookup_bound
-        )
-        if vals_block:
-            schema_lines.append("  " + vals_block.replace("\n", "\n  "))
 
     parts = ["Pre-loaded schema context:\n" + "\n".join(schema_lines)]
     if bundle.relationships:

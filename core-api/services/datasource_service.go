@@ -2,7 +2,10 @@ package services
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +28,17 @@ var trinoSystemCatalogs = map[string]bool{
 // allowedDataSourceTypes mirrors the data_sources.source_type CHECK constraint.
 var allowedDataSourceTypes = map[string]bool{
 	"postgresql": true, "mongodb": true, "elasticsearch": true, "mysql": true, "trino": true,
+	"zoho_books": true, "tally": true,
+}
+
+// sharedCatalogTypes are source types where many data_sources rows share one
+// static Trino catalog (one schema per registered customer connection),
+// rather than the one-catalog-per-row model every other type uses. Catalog
+// auto-discovery must never blindly register a row for these — a real row is
+// only ever created through the type's own OAuth/setup flow (Create), which
+// is also the only place real credentials get attached.
+var sharedCatalogTypes = map[string]bool{
+	"zoho_books": true, "tally": true,
 }
 
 // DataSourceService manages registered data source connections.
@@ -54,7 +68,7 @@ func (s *DataSourceService) List() ([]models.DataSource, error) {
 		       COALESCE(database_name, '') as database_name,
 		       COALESCE(username, '') as username,
 		       COALESCE(extra_config::text, '{}') as extra_config,
-		       trino_catalog, is_active,
+		       trino_catalog, COALESCE(trino_schema, '') as trino_schema, is_active,
 		       COALESCE(schema_cache::text, '{}') as schema_cache,
 		       last_schema_refresh, created_at, updated_at
 		FROM data_sources
@@ -73,7 +87,7 @@ func (s *DataSourceService) List() ([]models.DataSource, error) {
 		err := rows.Scan(
 			&ds.ID, &ds.Name, &ds.SourceType, &ds.Host, &ds.Port,
 			&ds.DatabaseName, &ds.Username, &ds.ExtraConfig,
-			&ds.TrinoCatalog, &ds.IsActive, &ds.SchemaCache,
+			&ds.TrinoCatalog, &ds.TrinoSchema, &ds.IsActive, &ds.SchemaCache,
 			&lastRefresh, &ds.CreatedAt, &ds.UpdatedAt,
 		)
 		if err != nil {
@@ -96,14 +110,14 @@ func (s *DataSourceService) GetByID(id int) (*models.DataSource, error) {
 		       COALESCE(database_name, '') as database_name,
 		       COALESCE(username, '') as username,
 		       COALESCE(extra_config::text, '{}') as extra_config,
-		       trino_catalog, is_active,
+		       trino_catalog, COALESCE(trino_schema, '') as trino_schema, is_active,
 		       COALESCE(schema_cache::text, '{}') as schema_cache,
 		       last_schema_refresh, created_at, updated_at
 		FROM data_sources WHERE id = $1
 	`, id).Scan(
 		&ds.ID, &ds.Name, &ds.SourceType, &ds.Host, &ds.Port,
 		&ds.DatabaseName, &ds.Username, &ds.ExtraConfig,
-		&ds.TrinoCatalog, &ds.IsActive, &ds.SchemaCache,
+		&ds.TrinoCatalog, &ds.TrinoSchema, &ds.IsActive, &ds.SchemaCache,
 		&lastRefresh, &ds.CreatedAt, &ds.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -120,7 +134,72 @@ func (s *DataSourceService) GetByID(id int) (*models.DataSource, error) {
 
 // Create registers a new data source.
 func (s *DataSourceService) Create(req models.CreateDataSourceRequest) (*models.DataSource, error) {
+	trinoCatalog := req.TrinoCatalog
+	var trinoSchema string
+
 	extraConfig := req.ExtraConfig
+
+	if sharedCatalogTypes[req.SourceType] {
+		// One static catalog per type, shared by every registered customer
+		// connection of that type — the customer's own row is distinguished
+		// by schema, not by a dedicated catalog.
+		if trinoCatalog == "" {
+			trinoCatalog = req.SourceType
+		}
+		trinoSchema = sanitizeSchemaName(req.Name)
+		if trinoSchema == "" {
+			return nil, fmt.Errorf("name must contain at least one letter or digit to derive a Trino schema")
+		}
+	} else if req.Host == "" || req.Port == 0 || trinoCatalog == "" {
+		return nil, fmt.Errorf("host, port and trino_catalog are required for source_type %q", req.SourceType)
+	}
+
+	if req.SourceType == "zoho_books" {
+		if req.ClientID == "" || req.ClientSecret == "" || req.GrantCode == "" || req.OrganizationID == "" {
+			return nil, fmt.Errorf("client_id, client_secret, grant_code and organization_id are required for zoho_books")
+		}
+		dataCenter := req.DataCenter
+		if dataCenter == "" {
+			dataCenter = "com"
+		}
+		refreshToken, err := exchangeZohoGrantCode(dataCenter, req.ClientID, req.ClientSecret, req.GrantCode)
+		if err != nil {
+			return nil, fmt.Errorf("failed to exchange Zoho grant code: %w", err)
+		}
+		// The grant code is single-use and already spent by the exchange
+		// above — only the long-lived refresh token needs to survive past
+		// this request. Stuffed into req.Password so it flows through the
+		// same encryption path as every other source type's secret, below.
+		credsJSON, err := json.Marshal(map[string]string{
+			"client_id": req.ClientID, "client_secret": req.ClientSecret, "refresh_token": refreshToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize zoho_books credentials: %w", err)
+		}
+		req.Password = string(credsJSON)
+		extraJSON, err := json.Marshal(map[string]string{
+			"data_center": dataCenter, "organization_id": req.OrganizationID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize zoho_books config: %w", err)
+		}
+		extraConfig = string(extraJSON)
+	}
+
+	// tally has no OAuth flow — the customer's tally-bridge agent
+	// authenticates to the tunnel with this token instead. Generated here
+	// (never customer-supplied), returned in cleartext exactly once below,
+	// and stored only encrypted from this point on.
+	var bridgeToken string
+	if req.SourceType == "tally" {
+		tokenBytes := make([]byte, 32)
+		if _, err := cryptorand.Read(tokenBytes); err != nil {
+			return nil, fmt.Errorf("failed to generate tally bridge token: %w", err)
+		}
+		bridgeToken = base64.URLEncoding.EncodeToString(tokenBytes)
+		req.Password = bridgeToken
+	}
+
 	if extraConfig == "" {
 		extraConfig = "{}"
 	}
@@ -134,18 +213,78 @@ func (s *DataSourceService) Create(req models.CreateDataSourceRequest) (*models.
 	err = s.db.QueryRow(`
 		INSERT INTO data_sources
 		    (name, source_type, host, port, database_name, username, password_encrypted,
-		     trino_catalog, extra_config, is_active)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, true)
+		     trino_catalog, trino_schema, extra_config, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, true)
 		RETURNING id
 	`,
 		req.Name, req.SourceType, req.Host, req.Port,
 		req.DatabaseName, req.Username, encryptedPassword,
-		req.TrinoCatalog, extraConfig,
+		trinoCatalog, trinoSchema, extraConfig,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create data_source: %w", err)
 	}
-	return s.GetByID(id)
+	ds, err := s.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+	// Only ever surfaced here, in this one response — GetByID never selects
+	// password_encrypted, let alone decrypts it, so there is no other path
+	// that could leak it later.
+	ds.BridgeToken = bridgeToken
+	return ds, nil
+}
+
+// FindTallyDatasourceByBridgeToken looks up which registered tally
+// datasource a bridge's presented token belongs to. Every active tally
+// row's secret is decrypted and compared in constant time — there's no
+// indexed/hashed lookup available without changing what's stored, and the
+// number of tally connections on a single self-hosted instance is small
+// enough that this is cheap in practice.
+func (s *DataSourceService) FindTallyDatasourceByBridgeToken(token string) (int, error) {
+	rows, err := s.db.Query(`SELECT id, password_encrypted FROM data_sources WHERE source_type = 'tally' AND is_active = true`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query tally data sources: %w", err)
+	}
+	defer rows.Close()
+
+	presented := []byte(token)
+	for rows.Next() {
+		var id int
+		var encrypted string
+		if err := rows.Scan(&id, &encrypted); err != nil {
+			return 0, fmt.Errorf("failed to scan tally data source: %w", err)
+		}
+		decrypted, err := s.encryptor.Decrypt(encrypted)
+		if err != nil {
+			continue // a row whose secret fails to decrypt can't match — skip it, don't fail the whole lookup
+		}
+		if subtle.ConstantTimeCompare([]byte(decrypted), presented) == 1 {
+			return id, nil
+		}
+	}
+	return 0, fmt.Errorf("no active tally datasource matches the presented bridge token")
+}
+
+// sanitizeSchemaName derives a valid, lowercase Trino/SQL schema identifier
+// from a user-supplied datasource name (e.g. "Acme Corp — Main Org" ->
+// "acme_corp_main_org"). Used only for source types that share one static
+// catalog across many registered connections, where the schema name is what
+// actually distinguishes one customer's data from another's.
+func sanitizeSchemaName(name string) string {
+	var b strings.Builder
+	prevUnderscore := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevUnderscore = false
+		case !prevUnderscore:
+			b.WriteRune('_')
+			prevUnderscore = true
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }
 
 // Update modifies an existing data source.
@@ -180,8 +319,12 @@ func (s *DataSourceService) Update(id int, req models.UpdateDataSourceRequest) (
 		argIdx++
 	}
 	if req.Password != "" {
+		encryptedPassword, err := s.encryptor.Encrypt(req.Password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt datasource credentials: %w", err)
+		}
 		setParts = append(setParts, fmt.Sprintf("password_encrypted = $%d", argIdx))
-		args = append(args, req.Password)
+		args = append(args, encryptedPassword)
 		argIdx++
 	}
 	if req.IsActive != nil {
@@ -222,7 +365,7 @@ func (s *DataSourceService) RefreshSchema(id int) (*models.SchemaRefreshResult, 
 	}
 
 	// Fetch schema from Trino
-	schema, tablesFound, err := s.fetchSchemaFromTrino(ds.TrinoCatalog)
+	schema, tablesFound, err := s.fetchSchemaFromTrino(ds.TrinoCatalog, ds.TrinoSchema)
 	if err != nil {
 		return nil, fmt.Errorf("schema fetch failed for %s: %w", ds.TrinoCatalog, err)
 	}
@@ -293,13 +436,20 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 		if !allowedDataSourceTypes[sourceType] {
 			sourceType = "trino"
 		}
+		// zoho_books/tally rows are only ever created through their own
+		// OAuth/setup flow (Create), which is also the only place real
+		// credentials get attached — never blindly auto-register one here,
+		// even if its shared catalog is visible in Trino with no rows yet.
+		if sharedCatalogTypes[sourceType] {
+			continue
+		}
 		name := strings.ToUpper(catalog[:1]) + catalog[1:]
 
 		res, err := s.db.Exec(`
 			INSERT INTO data_sources
 			    (name, source_type, host, port, trino_catalog, extra_config, is_active)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb, true)
-			ON CONFLICT (trino_catalog) DO NOTHING
+			ON CONFLICT (trino_catalog, trino_schema) DO NOTHING
 		`, name, sourceType, s.trinoHost, trinoPort, catalog, `{"auto_discovered": true}`)
 		if err != nil {
 			log.Printf("catalog sync: failed to register catalog %s: %v", catalog, err)
@@ -318,7 +468,7 @@ func (s *DataSourceService) SyncCatalogsFromTrino() (*models.SyncCatalogsResult,
 
 	columnsRefreshed := 0
 	for _, ds := range sources {
-		schema, _, err := s.fetchSchemaFromTrino(ds.TrinoCatalog)
+		schema, _, err := s.fetchSchemaFromTrino(ds.TrinoCatalog, ds.TrinoSchema)
 		if err != nil {
 			log.Printf("catalog sync: schema fetch failed for %s: %v", ds.TrinoCatalog, err)
 			continue
@@ -630,15 +780,25 @@ func (s *DataSourceService) syncDatasetsForCatalog(
 
 		switch {
 		case err == sql.ErrNoRows:
-			// New table — register it with a placeholder description.
+			// New table — register it with a placeholder description. Name
+			// collisions are resolved by progressively qualifying the name:
+			// bare table name, then catalog-qualified, then schema-qualified
+			// too. The catalog-qualified level alone isn't enough once one
+			// catalog can back many datasources (sharedCatalogTypes) — e.g.
+			// two different Tally companies both have a "vouchers" table, so
+			// "tally.vouchers" collides for the second one just like the
+			// bare name did.
 			name := tTable
-			var nameTaken bool
-			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM datasets WHERE name = $1)`, name).
-				Scan(&nameTaken); err != nil {
-				return added, columnsChanged, fmt.Errorf("failed to check dataset name for %s: %w", trinoPath, err)
-			}
-			if nameTaken {
-				name = fmt.Sprintf("%s.%s", catalog, tTable)
+			for _, candidate := range []string{tTable, fmt.Sprintf("%s.%s", catalog, tTable), fmt.Sprintf("%s.%s.%s", catalog, tSchema, tTable)} {
+				var taken bool
+				if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM datasets WHERE name = $1)`, candidate).
+					Scan(&taken); err != nil {
+					return added, columnsChanged, fmt.Errorf("failed to check dataset name for %s: %w", trinoPath, err)
+				}
+				name = candidate
+				if !taken {
+					break
+				}
 			}
 			if err := s.db.QueryRow(`
 				INSERT INTO datasets (name, description, source_type, trino_catalog, trino_schema, trino_table)
@@ -750,20 +910,30 @@ func (s *DataSourceService) reconcileDatasetColumns(datasetID int, cols []map[st
 }
 
 // fetchSchemaFromTrino queries Trino's information_schema for a catalog.
-func (s *DataSourceService) fetchSchemaFromTrino(catalog string) (map[string]interface{}, int, error) {
+// schema, if non-empty, restricts the result to that one schema within the
+// catalog — required for source types where many data_sources rows share one
+// catalog (zoho_books, tally): without it, every registered customer
+// connection's schema_cache/datasets would pick up every OTHER customer's
+// tables too, since they all live in the same catalog.
+func (s *DataSourceService) fetchSchemaFromTrino(catalog, schema string) (map[string]interface{}, int, error) {
 	skipSchemas := []string{"information_schema", "pg_catalog", "pg_toast", "_schema", "system"}
 	skipList := make([]string, len(skipSchemas))
 	for i, s := range skipSchemas {
 		skipList[i] = fmt.Sprintf("'%s'", s)
 	}
 
+	schemaFilter := fmt.Sprintf("table_schema NOT IN (%s)", strings.Join(skipList, ", "))
+	if schema != "" {
+		schemaFilter = fmt.Sprintf("table_schema = '%s'", schema)
+	}
+
 	sql := fmt.Sprintf(`
 		SELECT table_schema, table_name, column_name, data_type
 		FROM %s.information_schema.columns
-		WHERE table_schema NOT IN (%s)
+		WHERE %s
 		  AND table_name NOT LIKE '\\_%%'
 		ORDER BY table_schema, table_name, ordinal_position
-	`, catalog, strings.Join(skipList, ", "))
+	`, catalog, schemaFilter)
 
 	rows, err := s.runTrinoQuery(sql)
 	if err != nil {

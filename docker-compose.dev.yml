@@ -73,3 +73,36 @@ services:
       - /app/node_modules
     ports: !override
       - "3000:5173"
+
+  # ── Tally test double (dev/test only — see mock-tally/server.py) ──
+  # Neither of these exists in docker-compose.yml: TallyPrime is proprietary
+  # Windows software with no official Docker image, so this is what
+  # trino-plugins/tally is actually exercised against in this repo.
+  mock-tally:
+    build:
+      context: ./mock-tally
+    container_name: fap-mock-tally
+    networks:
+      - federation-net
+
+  # Bootstrap (one-time, manual — the token can't be known ahead of time):
+  #   1. docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mock-tally core-api
+  #   2. curl -X POST http://localhost:8081/api/datasources \
+  #        -H "Authorization: Bearer $API_AUTH_TOKEN" -H "Content-Type: application/json" \
+  #        -d '{"name":"Dev Tally Co","source_type":"tally"}'
+  #      -> copy the returned "bridge_token"
+  #   3. TALLY_BRIDGE_TOKEN=<that token> docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d tally-bridge
+  # Then query e.g. tally.dev_tally_co.ledgers from Trino.
+  tally-bridge:
+    build:
+      context: ./tally-bridge
+    container_name: fap-tally-bridge
+    command:
+      - "-server=http://core-api:8081"
+      - "-token=${TALLY_BRIDGE_TOKEN:-}"
+      - "-tally=http://mock-tally:9000"
+    depends_on:
+      - mock-tally
+      - core-api
+    networks:
+      - federation-net
