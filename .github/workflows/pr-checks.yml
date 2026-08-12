@@ -64,6 +64,10 @@ jobs:
       - run: python3 scripts/check-env-sync.py
 
   e2e-ux:
+    # PR-only: the whole point is verifying a change before it merges. Once it's
+    # on main it's already been through this, so re-running it (and re-spending
+    # a real Gemini quota call) on every push to main is pure waste.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     env:
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

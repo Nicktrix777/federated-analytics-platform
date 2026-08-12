@@ -133,7 +133,6 @@ const DatasetRow: React.FC<DatasetRowProps> = ({
                     title={[
                       `${col.column_name} — ${col.data_type}`,
                       col.description || null,
-                      col.sample_values ? `Samples: ${col.sample_values}` : null,
                       nested > 0
                         ? `Composite column with ${nested} top-level field${nested === 1 ? "" : "s"} — dereference a leaf, e.g. ${col.column_name}.field`
                         : null,

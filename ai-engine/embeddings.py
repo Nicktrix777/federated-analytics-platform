@@ -25,7 +25,7 @@ import logging
 from agents.tools._common import meta_connection
 from config import settings
 from llm.openai_provider import OpenAIProvider
-from schema_render import leaf_paths, parse_samples, summarize_type
+from schema_render import leaf_paths, summarize_type
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +50,6 @@ def _build_embed_text(name: str, description: str, columns: list[dict]) -> str:
         paths = leaf_paths(col_name, data_type, max_leaves=30)
         if paths:
             lines.append("    fields: " + ", ".join(paths))
-        # Fold real sampled values into the embedding text so a question that
-        # names a value ("Indian drivers", "expired contracts") retrieves the
-        # dataset holding it.
-        samples = parse_samples(col.get("sample_values"))
-        if samples:
-            vals = sorted({v for vs in samples.values() for v in vs})
-            if vals:
-                lines.append("    values: " + ", ".join(vals[:40]))
     return "\n".join(lines)
 
 
@@ -72,11 +64,9 @@ async def _load_dataset_texts(conn) -> dict[int, tuple[str, str]]:
         """
         SELECT d.id, d.name, d.description,
                dc.column_name, dc.data_type,
-               dc.description AS column_description,
-               cp.sample_values
+               dc.description AS column_description
         FROM datasets d
         LEFT JOIN dataset_columns dc ON dc.dataset_id = d.id
-        LEFT JOIN column_profiles cp ON cp.dataset_column_id = dc.id
         WHERE d.is_active = true
         ORDER BY d.id, dc.id
         """
@@ -95,7 +85,6 @@ async def _load_dataset_texts(conn) -> dict[int, tuple[str, str]]:
                 "column_name": row["column_name"],
                 "data_type": row["data_type"],
                 "description": row["column_description"] or "",
-                "sample_values": row["sample_values"] or "",
             })
 
     out: dict[int, tuple[str, str]] = {}

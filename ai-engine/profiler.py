@@ -1,4 +1,4 @@
-"""Column profiler — deterministic pattern detection and sample-value persistence.
+"""Column profiler — deterministic pattern detection, no literal values ever persisted.
 
 Replaces sampling.py.  Carries over the core Trino row-walk logic (_collect,
 _keep, cardinality constants, LIMIT 25 sample) and adds:
@@ -10,8 +10,14 @@ _keep, cardinality constants, LIMIT 25 sample) and adds:
     doc taxonomy (country_code_alpha3, currency_code, internal_enum, uuid, …).
     **Suggestion only** — persisted to column_profiles.suggested_semantic_type;
     humans promote to dataset_columns.semantic_type via SQL (one-writer rule).
-  - sensitivity gating:  forbidden → DELETE + skip; sensitive → stats/pattern
-    only (sample_values=NULL); public/unclassified → everything (default-allow).
+  - real sampled values are used ONLY in-memory to compute the above — a
+    literal customer value is never written anywhere. Nested/leaf paths
+    (Mongo/ES documents, nested Trino ROW/ARRAY) get their own derived
+    pattern/semantic_type too, stored in column_profiles.stats keyed by leaf
+    path, so per-leaf filter-format guidance survives without literals.
+  - sensitivity still gates PROFILING ITSELF: forbidden → DELETE + skip
+    entirely; sensitive/public/unclassified all get the same derived stats
+    (no per-tier difference now that literals are never stored regardless).
   - content-hash upsert to column_profiles:  skip unchanged datasets.
 
 Schema-agnostic: works purely off parsed Trino types — any nested source
@@ -234,17 +240,41 @@ def _count_nulls(rows: list, col_index: int, total: int) -> float:
     return round(nulls / total, 4)
 
 
+# ── Per-leaf derived stats (replaces literal sample_values) ──────
+
+def _leaf_stats(payload: Optional[dict], top_level_name: str) -> Optional[dict]:
+    """Derive {leaf_path: {pattern, semantic_type}} for every NESTED leaf
+    under a column, from its real sampled values — used only transiently
+    here to classify, never persisted. Excludes the column's own top-level
+    leaf (payload[top_level_name]), since that's already covered by the
+    dedicated pattern/suggested_semantic_type columns. Returns None rather
+    than {} when there's nothing worth recording, matching every other
+    "nothing to report" convention in this module.
+    """
+    if not payload:
+        return None
+    stats: dict = {}
+    for leaf_path, vals in payload.items():
+        if leaf_path == top_level_name:
+            continue
+        leaf_pattern = _detect_pattern(vals)
+        leaf_semantic = _suggest_semantic_type(leaf_pattern, leaf_path)
+        if leaf_pattern or leaf_semantic:
+            stats[leaf_path] = {"pattern": leaf_pattern, "semantic_type": leaf_semantic}
+    return stats or None
+
+
 # ── Content hash ──────────────────────────────────────────────────
 
 def _profile_content_hash(
-    sample_values_json: Optional[str],
+    stats_json: Optional[str],
     pattern: Optional[str],
     distinct_count: Optional[int],
     null_fraction: Optional[float],
 ) -> str:
     """Hash of the profile content to detect changes across runs."""
     parts = [
-        sample_values_json or "",
+        stats_json or "",
         pattern or "",
         str(distinct_count or 0),
         str(null_fraction or 0.0),
@@ -335,15 +365,14 @@ async def _profile_dataset(conn, ds: dict) -> dict:
         # Suggest semantic type
         suggested = _suggest_semantic_type(pattern, name)
 
-        # Gate sample_values by sensitivity
-        if sensitivity == "sensitive":
-            sample_values_json = None  # stats/pattern only, no literals
-        else:
-            # public or unclassified → everything (default-allow)
-            sample_values_json = json.dumps(payload, ensure_ascii=False) if payload else None
+        # Derived per-leaf stats for nested paths — real values are used only
+        # in-memory above (all_values/payload) to classify; nothing literal
+        # is ever serialized here or anywhere below.
+        leaf_stats = _leaf_stats(payload, name)
+        stats_json = json.dumps(leaf_stats, ensure_ascii=False) if leaf_stats else None
 
         # Content hash to skip unchanged
-        content_hash = _profile_content_hash(sample_values_json, pattern, distinct_count, null_frac)
+        content_hash = _profile_content_hash(stats_json, pattern, distinct_count, null_frac)
         if existing_hashes.get(col_id) == content_hash:
             skipped += 1
             continue
@@ -352,20 +381,20 @@ async def _profile_dataset(conn, ds: dict) -> dict:
         await conn.execute(
             """INSERT INTO column_profiles
                    (dataset_column_id, pattern, suggested_semantic_type,
-                    distinct_count, null_fraction, sample_values,
+                    distinct_count, null_fraction, stats,
                     content_hash, profiled_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
                ON CONFLICT (dataset_column_id) DO UPDATE SET
                    pattern = EXCLUDED.pattern,
                    suggested_semantic_type = EXCLUDED.suggested_semantic_type,
                    distinct_count = EXCLUDED.distinct_count,
                    null_fraction = EXCLUDED.null_fraction,
-                   sample_values = EXCLUDED.sample_values,
+                   stats = EXCLUDED.stats,
                    content_hash = EXCLUDED.content_hash,
                    profiled_at = NOW()
             """,
             col_id, pattern, suggested, distinct_count, null_frac,
-            sample_values_json, content_hash,
+            stats_json, content_hash,
         )
         profiled += 1
 

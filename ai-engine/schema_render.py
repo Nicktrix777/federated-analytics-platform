@@ -137,12 +137,18 @@ def summarize_type(data_type: str) -> str:
 
 
 # ── Rendering ─────────────────────────────────────────────────────
+#
+# No real customer value is ever rendered here — only derived, non-literal
+# classifications (a detected pattern/semantic type). Real sampled values are
+# used transiently in ai-engine/profiler.py to compute these, then discarded;
+# nothing literal is persisted or shown downstream of that.
 
-def parse_samples(raw) -> dict:
-    """Parse a dataset_columns.sample_values cell into {full_leaf_path: [values]}.
+def parse_leaf_stats(raw) -> dict:
+    """Parse a column_profiles.stats cell into {leaf_path: {pattern, semantic_type}}.
 
-    Sampling writes JSON keyed by full leaf path; anything else (empty/legacy)
-    yields no samples rather than leaking raw text into the prompt.
+    Written by the profiler for NESTED leaf paths only (a column's own
+    top-level pattern/semantic_type live in their own dedicated columns).
+    Anything else (empty/malformed) yields no hints rather than guessing.
     """
     if not raw:
         return {}
@@ -153,57 +159,29 @@ def parse_samples(raw) -> dict:
         return {}
 
 
-def _fmt_samples(vals) -> str:
-    return ", ".join(str(v) for v in (vals or [])[:8])
-
-
-def column_sample_suffix(column_name: str, samples: Optional[dict]) -> str:
-    """`[e.g. ...]` suffix for a TOP-LEVEL scalar column line (keyed by column name)."""
-    vals = (samples or {}).get(column_name)
-    return f" [e.g. {_fmt_samples(vals)}]" if vals else ""
-
-
-def categorical_values_block(columns, *, max_leaves: int = 400, max_vals: int = 12) -> str:
-    """A compact, truncation-proof list of real values for NESTED categorical leaves.
-
-    The per-column tree gets capped for size, which can hide a deep field's
-    sample values (e.g. details…drivers.nationality sits past the cap). This
-    block surfaces those values independently so the model filters on real
-    literals. Top-level scalar columns are skipped here — their samples already
-    render inline on the column line via column_sample_suffix.
-
-    `columns` is an iterable of (column_name, sample_values_raw) pairs.
-    """
-    lines: list[str] = []
-    for _name, raw in columns:
-        for path, vals in parse_samples(raw).items():
-            if "." in path and vals:  # nested leaf only
-                lines.append(f"  - {path}: {_fmt_samples(vals[:max_vals])}")
-                if len(lines) >= max_leaves:
-                    break
-        if len(lines) >= max_leaves:
-            break
-    if not lines:
+def _leaf_format_hint(leaf_stats: Optional[dict], path: str) -> str:
+    """`[format: X]` suffix for a nested leaf path, from its derived pattern/semantic
+    type — never a literal example value."""
+    entry = (leaf_stats or {}).get(path)
+    if not entry:
         return ""
-    return (
-        "Known nested field values (use these EXACT literals in filters — a value "
-        "is often a code, e.g. nationality 'IND' not 'Indian'):\n" + "\n".join(lines)
-    )
+    label = entry.get("semantic_type") or entry.get("pattern")
+    return f" [format: {label}]" if label else ""
 
 
 def describe_column(
     column_name: str,
     data_type: str,
-    samples: Optional[dict] = None,
+    leaf_stats: Optional[dict] = None,
     *,
     max_depth: int = 6,
     max_leaves: int = 40,
 ) -> tuple[str, list[str]]:
     """Render a column for a prompt's schema context.
 
-    `samples` is the parsed {full_leaf_path: [values]} map for this column; when
-    present, real example values are appended to the matching leaf lines so the
-    model filters on actual data (e.g. nationality 'IND', not 'Indian').
+    `leaf_stats` is the parsed {full_leaf_path: {pattern, semantic_type}} map
+    for this column (column_profiles.stats); when present, a `[format: X]`
+    hint is appended to the matching leaf line — never a literal value.
 
     Returns (inline_type, detail_lines):
       - scalar column → (scalar type, []) so the caller can render it on one line.
@@ -218,8 +196,7 @@ def describe_column(
     state = {"count": 0, "truncated": False}
 
     def sfx(path: str) -> str:
-        vals = (samples or {}).get(path)
-        return f" [e.g. {_fmt_samples(vals)}]" if vals else ""
+        return _leaf_format_hint(leaf_stats, path)
 
     def add(line: str) -> None:
         if state["count"] >= max_leaves:
@@ -234,7 +211,7 @@ def describe_column(
     # output — depth-first did exactly that, and the model then hallucinated the
     # hidden field names. `disp` is the path shown (uses UNNEST aliases across
     # arrays); `canon` is the array-transparent dotted data path used to look up
-    # samples (column.field.field). They diverge once an ARRAY(ROW) is unnested.
+    # leaf_stats (column.field.field). They diverge once an ARRAY(ROW) is unnested.
     queue: deque = deque()
     if node["kind"] == "row":
         for fn, child in node["fields"]:
